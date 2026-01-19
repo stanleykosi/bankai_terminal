@@ -11,6 +11,7 @@
 pub mod config;
 pub mod engine;
 pub mod error;
+pub mod oracle;
 pub mod security;
 pub mod storage;
 pub mod telemetry;

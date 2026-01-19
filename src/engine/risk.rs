@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicU8, O
 use std::sync::Arc;
 
 use crate::config::TradingConfig;
+use crate::error::{BankaiError, Result};
 
 #[derive(Debug, Clone)]
 pub struct KillSwitchConfig {
@@ -170,4 +171,41 @@ impl RiskState {
             self.halt_reason.store(reason as u8, Ordering::SeqCst);
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct StalenessCheck {
+    pub ratio: f64,
+    pub is_stale: bool,
+}
+
+pub fn calculate_staleness_ratio(
+    now_ms: u64,
+    signal_timestamp_ms: u64,
+    candle_end_timestamp_ms: u64,
+) -> Result<f64> {
+    if candle_end_timestamp_ms <= now_ms {
+        return Err(BankaiError::InvalidArgument(
+            "candle_end_timestamp_ms must be in the future".to_string(),
+        ));
+    }
+    let elapsed = now_ms.saturating_sub(signal_timestamp_ms);
+    let remaining = candle_end_timestamp_ms - now_ms;
+    if remaining == 0 {
+        return Ok(1.0);
+    }
+    Ok(elapsed as f64 / remaining as f64)
+}
+
+pub fn evaluate_staleness(
+    now_ms: u64,
+    signal_timestamp_ms: u64,
+    candle_end_timestamp_ms: u64,
+    max_ratio: f64,
+) -> Result<StalenessCheck> {
+    let ratio = calculate_staleness_ratio(now_ms, signal_timestamp_ms, candle_end_timestamp_ms)?;
+    Ok(StalenessCheck {
+        ratio,
+        is_stale: ratio > max_ratio,
+    })
 }

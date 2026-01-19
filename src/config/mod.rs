@@ -29,6 +29,8 @@ pub struct Config {
     pub fees: FeeConfig,
     #[serde(default)]
     pub health: HealthConfig,
+    #[serde(default)]
+    pub allora_consumer: Option<AlloraConsumerConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -60,6 +62,21 @@ pub struct StrategyConfig {
 pub struct FeeConfig {
     pub taker_fee_bps: f64,
     pub estimated_gas_bps: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AlloraConsumerConfig {
+    pub base_url: String,
+    pub chain: String,
+    pub poll_interval_secs: u64,
+    pub timeout_ms: u64,
+    pub topics: Vec<AlloraTopicConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AlloraTopicConfig {
+    pub asset: String,
+    pub timeframe: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]

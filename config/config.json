@@ -32,6 +32,20 @@
     "taker_fee_bps": 300.0,
     "estimated_gas_bps": 20.0
   },
+  "allora_consumer": {
+    "base_url": "https://api.allora.network/v2/allora/consumer",
+    "chain": "price/ethereum-11155111",
+    "poll_interval_secs": 2,
+    "timeout_ms": 2000,
+    "topics": [
+      { "asset": "BTC", "timeframe": "5m" },
+      { "asset": "BTC", "timeframe": "8h" },
+      { "asset": "ETH", "timeframe": "5m" },
+      { "asset": "ETH", "timeframe": "8h" },
+      { "asset": "SOL", "timeframe": "5m" },
+      { "asset": "SOL", "timeframe": "8h" }
+    ]
+  },
   "health": {
     "clock_drift_check_interval_secs": 30,
     "time_api_url": null,

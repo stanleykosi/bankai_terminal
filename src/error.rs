@@ -36,6 +36,10 @@ pub enum BankaiError {
     Sqlx(#[from] sqlx::Error),
     #[error("python error: {0}")]
     Python(#[from] pyo3::PyErr),
+    #[error("websocket error: {0}")]
+    Websocket(#[from] tokio_tungstenite::tungstenite::Error),
+    #[error("time error: {0}")]
+    Time(#[from] std::time::SystemTimeError),
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
 }

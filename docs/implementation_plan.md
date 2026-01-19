@@ -71,14 +71,14 @@
   - **User Instructions**: Run `pytest` in the `python/` directory to verify logic.
 
 ## Phase 4: Oracle Module (Data Ingestion)
-- [ ] Step 9: Binance Oracle ("The Truth")
+- [X] Step 9: Binance Oracle ("The Truth")
   - **Task**: Implement `src/oracle/binance.rs`. Connect to WSS streams for `aggTrade` (volatility calc) and `bookTicker` (immediate price). Implement the Rolling 1-minute Volatility calculation and Distance From Open (DFO) logic aligned to the Polymarket candle start time.
   - **Files**:
     - `src/oracle/binance.rs`: WebSocket handler.
     - `src/engine/types.rs`: Shared market data types.
   - **Step Dependencies**: Step 5
 
-- [ ] Step 10: Allora Oracle ("The Signal")
+- [X] Step 10: Allora Oracle ("The Signal")
   - **Task**: Implement `src/oracle/allora.rs`. Poll the Allora RPC for `Combined Inference`. Implement the Staleness Ratio calculation: `(Now - Signal_Timestamp) / Candle_Time_Remaining`. Reject signals where ratio > 5%.
   - **Files**:
     - `src/oracle/allora.rs`: HTTP polling client.

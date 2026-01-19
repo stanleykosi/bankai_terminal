@@ -40,3 +40,5 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 metrics = "0.21"
 uuid = { version = "1.7", features = ["v4"] }
 pyo3 = { version = "0.21", features = ["auto-initialize"] }
+tokio-tungstenite = "0.21"
+futures-util = "0.3"
