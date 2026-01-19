@@ -92,7 +92,7 @@
     - `src/storage/redis.rs`: methods for market metadata.
   - **Step Dependencies**: Step 5
 
-- [ ] Step 12: Polymarket RTDS (Order Book)
+- [X] Step 12: Polymarket RTDS (Order Book)
   - **Task**: Implement `src/oracle/polymarket_rtds.rs`. Connect to `wss://ws-live-data.polymarket.com`. Fetch initial snapshot via REST, then apply `price_change` updates to maintain a local ZSET order book in Redis.
   - **Files**:
     - `src/oracle/polymarket_rtds.rs`: WebSocket and Snapshot client.
