@@ -85,7 +85,7 @@
     - `src/engine/risk.rs`: Add staleness check functions.
   - **Step Dependencies**: Step 5
 
-- [ ] Step 11: Polymarket Discovery (Gamma API)
+- [X] Step 11: Polymarket Discovery (Gamma API)
   - **Task**: Implement `src/oracle/polymarket_discovery.rs`. Poll Gamma API every 30s (with jitter). Filter markets: Liquidity > $2k, exclude "Augmented Negative Risk". Fetch and store `feeRateBps` and `minTickSize` in Redis.
   - **Files**:
     - `src/oracle/polymarket_discovery.rs`: Gamma API client.

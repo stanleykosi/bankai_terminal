@@ -88,4 +88,23 @@ impl RedisManager {
         let mut conn = self.connection.clone();
         Ok(conn.zrevrange_withscores(key, start, stop).await?)
     }
+
+    pub async fn set_market_metadata(
+        &self,
+        market_id: &str,
+        fee_rate_bps: f64,
+        min_tick_size: f64,
+    ) -> Result<()> {
+        let key = market_metadata_key(market_id);
+        let mut conn = self.connection.clone();
+        conn.hset::<_, _, _, ()>(key.as_str(), "feeRateBps", fee_rate_bps)
+            .await?;
+        conn.hset::<_, _, _, ()>(key.as_str(), "minTickSize", min_tick_size)
+            .await?;
+        Ok(())
+    }
+}
+
+fn market_metadata_key(market_id: &str) -> String {
+    format!("market:{market_id}:metadata")
 }

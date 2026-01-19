@@ -10,3 +10,4 @@
  */
 pub mod binance;
 pub mod allora;
+pub mod polymarket_discovery;
