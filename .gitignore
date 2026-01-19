@@ -14,3 +14,4 @@
 config/secrets.enc
 .env
 .env.*
+.venv/

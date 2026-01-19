@@ -34,6 +34,8 @@ pub enum BankaiError {
     Redis(#[from] redis::RedisError),
     #[error("database error: {0}")]
     Sqlx(#[from] sqlx::Error),
+    #[error("python error: {0}")]
+    Python(#[from] pyo3::PyErr),
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
 }

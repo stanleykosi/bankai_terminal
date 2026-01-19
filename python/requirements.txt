@@ -1,0 +1,13 @@
+# /**
+#  * @description
+#  * Python dependencies for embedded strategy execution.
+#  *
+#  * @dependencies
+#  * - numpy: numeric computation
+#  * - pandas: data wrangling
+#  *
+#  * @notes
+#  * - Install with `pip install -r python/requirements.txt`.
+#  */
+numpy
+pandas

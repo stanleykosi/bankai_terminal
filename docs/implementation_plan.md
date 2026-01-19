@@ -53,7 +53,7 @@
   - **Step Dependencies**: Step 1
 
 ## Phase 3: Python Integration & Logic Layer
-- [ ] Step 7: Python Embedding via PyO3
+- [X] Step 7: Python Embedding via PyO3
   - **Task**: Configure `build.rs` to link Python. Create `src/engine/python_host.rs` to initialize the Python interpreter. Define the Rust traits that expose necessary data to Python and the Python interface for strategy functions.
   - **Files**:
     - `build.rs`: PyO3 linker config.

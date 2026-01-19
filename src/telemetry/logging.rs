@@ -30,7 +30,7 @@ impl TraceContext {
     }
 
     pub fn span(&self, name: &'static str) -> Span {
-        tracing::info_span!(name, trace_id = %self.trace_id)
+        tracing::info_span!("trace", trace_id = %self.trace_id, span_name = %name)
     }
 
     pub fn trade_span(&self, market_id: &str) -> Span {
@@ -45,7 +45,5 @@ pub fn init_tracing() {
         .with_env_filter(env_filter)
         .with_target(false)
         .with_level(true)
-        .with_current_span(true)
-        .with_span_list(true)
         .init();
 }

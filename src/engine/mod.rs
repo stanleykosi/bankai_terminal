@@ -9,3 +9,4 @@
  * - Keep module boundaries aligned with docs/implementation_plan.md.
  */
 pub mod risk;
+pub mod python_host;

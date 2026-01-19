@@ -31,7 +31,7 @@ impl RedisManager {
 
     pub async fn set_float(&self, key: &str, value: f64) -> Result<()> {
         let mut conn = self.connection.clone();
-        conn.set(key, value).await?;
+        conn.set::<_, _, ()>(key, value).await?;
         Ok(())
     }
 
@@ -42,7 +42,7 @@ impl RedisManager {
 
     pub async fn hset_float(&self, key: &str, field: &str, value: f64) -> Result<()> {
         let mut conn = self.connection.clone();
-        conn.hset(key, field, value).await?;
+        conn.hset::<_, _, _, ()>(key, field, value).await?;
         Ok(())
     }
 
@@ -53,19 +53,19 @@ impl RedisManager {
 
     pub async fn hdel(&self, key: &str, field: &str) -> Result<()> {
         let mut conn = self.connection.clone();
-        conn.hdel(key, field).await?;
+        conn.hdel::<_, _, ()>(key, field).await?;
         Ok(())
     }
 
     pub async fn zadd(&self, key: &str, score: f64, member: &str) -> Result<()> {
         let mut conn = self.connection.clone();
-        conn.zadd(key, member, score).await?;
+        conn.zadd::<_, _, _, ()>(key, member, score).await?;
         Ok(())
     }
 
     pub async fn zrem(&self, key: &str, member: &str) -> Result<()> {
         let mut conn = self.connection.clone();
-        conn.zrem(key, member).await?;
+        conn.zrem::<_, _, ()>(key, member).await?;
         Ok(())
     }
 

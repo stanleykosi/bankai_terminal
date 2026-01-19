@@ -17,6 +17,9 @@ name = "bankai_terminal"
 version = "0.1.0"
 edition = "2021"
 
+[build-dependencies]
+pyo3-build-config = "0.21"
+
 [dependencies]
 tokio = { version = "1.36", features = ["full"] }
 tracing = "0.1"
@@ -36,3 +39,4 @@ rpassword = "7.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 metrics = "0.21"
 uuid = { version = "1.7", features = ["v4"] }
+pyo3 = { version = "0.21", features = ["auto-initialize"] }
