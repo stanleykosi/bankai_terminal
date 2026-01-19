@@ -62,7 +62,7 @@
   - **Step Dependencies**: Step 1
   - **User Instructions**: Run `pip install -r python/requirements.txt`.
 
-- [ ] Step 8: Core Logic Implementation (Python)
+- [X] Step 8: Core Logic Implementation (Python)
   - **Task**: Implement `python/strategy.py`. Write `calculate_kelly` (Fractional Kelly sizing), `validate_signal` (Allora vs Binance alignment), and `calculate_staleness` (time decay logic). Include unit tests in Python.
   - **Files**:
     - `python/strategy.py`: Math and logic functions.
