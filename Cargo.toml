@@ -1,0 +1,35 @@
+# /**
+#  * @description
+#  * Cargo manifest for the Bankai Terminal core engine.
+#  *
+#  * @dependencies
+#  * - tokio: async runtime
+#  * - tracing: structured logging
+#  * - serde: config and data serialization
+#  * - sqlx: TimescaleDB/Postgres access
+#  * - redis: hot state storage
+#  *
+#  * @notes
+#  * - Keep dependency versions aligned with project requirements.
+#  */
+[package]
+name = "bankai_terminal"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.36", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres"] }
+redis = "0.25"
+arc-swap = "1.6"
+notify = "6.1"
+thiserror = "1.0"
+aes-gcm = "0.10"
+argon2 = { version = "0.5", features = ["std"] }
+base64 = "0.21"
+secrecy = "0.8"
+rpassword = "7.3"

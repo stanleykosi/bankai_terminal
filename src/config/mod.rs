@@ -1,0 +1,152 @@
+/**
+ * @description
+ * Configuration loading and hot-reload support for runtime parameters.
+ *
+ * @dependencies
+ * - arc-swap: atomic swap of Arc<Config>
+ * - notify: filesystem watcher for config changes
+ * - serde: configuration deserialization
+ *
+ * @notes
+ * - Supports a leading JSDoc-style header in the JSON config file.
+ */
+use arc_swap::ArcSwap;
+use notify::{EventKind, RecursiveMode, Watcher};
+use serde::Deserialize;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::{mpsc, Arc},
+};
+
+use crate::error::{BankaiError, Result};
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Config {
+    pub endpoints: EndpointConfig,
+    pub trading: TradingConfig,
+    pub strategy: StrategyConfig,
+    pub fees: FeeConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct EndpointConfig {
+    pub binance_ws: String,
+    pub polymarket_ws: String,
+    pub polymarket_gamma: String,
+    pub allora_rpc: String,
+    pub relayer_http: String,
+    pub polygon_rpc: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TradingConfig {
+    pub max_volatility: f64,
+    pub kill_switch_latency_ms: u64,
+    pub kill_switch_clock_drift_ms: u64,
+    pub kill_switch_consecutive_losses: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct StrategyConfig {
+    pub kelly_fraction: f64,
+    pub snipe_min_edge_bps: f64,
+    pub spread_offset_bps: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct FeeConfig {
+    pub taker_fee_bps: f64,
+    pub estimated_gas_bps: f64,
+}
+
+pub struct ConfigManager {
+    path: PathBuf,
+    state: Arc<ArcSwap<Config>>,
+}
+
+impl ConfigManager {
+    pub fn new(path: impl Into<PathBuf>) -> Result<Self> {
+        let path = path.into();
+        let config = load_config(&path)?;
+        Ok(Self {
+            path,
+            state: Arc::new(ArcSwap::from_pointee(config)),
+        })
+    }
+
+    pub fn current(&self) -> Arc<Config> {
+        self.state.load_full()
+    }
+
+    pub fn spawn_watcher(&self) -> Result<tokio::task::JoinHandle<()>> {
+        let path = self.path.clone();
+        let state = Arc::clone(&self.state);
+
+        Ok(tokio::task::spawn_blocking(move || {
+            if let Err(error) = watch_loop(&path, state) {
+                tracing::error!(?error, "config watcher exited");
+            }
+        }))
+    }
+}
+
+fn load_config(path: &Path) -> Result<Config> {
+    let raw = fs::read_to_string(path)?;
+    let stripped = strip_jsdoc_header(&raw)?;
+    let trimmed = stripped.trim();
+    Ok(serde_json::from_str(trimmed)?)
+}
+
+fn watch_loop(path: &Path, state: Arc<ArcSwap<Config>>) -> Result<()> {
+    let (tx, rx) = mpsc::channel();
+    let mut watcher = notify::recommended_watcher(tx)?;
+    watcher.watch(path, RecursiveMode::NonRecursive)?;
+
+    loop {
+        let event = rx.recv()?;
+        match event {
+            Ok(event) => {
+                if !is_relevant_event(&event.kind) {
+                    continue;
+                }
+                match load_config(path) {
+                    Ok(config) => {
+                        state.store(Arc::new(config));
+                        tracing::info!("config reloaded");
+                    }
+                    Err(error) => {
+                        tracing::error!(?error, "failed to reload config");
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::error!(?error, "config watcher error");
+            }
+        }
+    }
+}
+
+fn is_relevant_event(kind: &EventKind) -> bool {
+    matches!(kind, EventKind::Modify(_) | EventKind::Create(_))
+}
+
+fn strip_jsdoc_header(contents: &str) -> Result<&str> {
+    let start_index = contents
+        .char_indices()
+        .find(|(_, c)| !c.is_whitespace())
+        .map(|(idx, _)| idx)
+        .unwrap_or(0);
+
+    if !contents[start_index..].starts_with("/**") {
+        return Ok(contents);
+    }
+
+    let header_start = start_index + 3;
+    let header_end = contents[header_start..]
+        .find("*/")
+        .ok_or(BankaiError::InvalidHeader)?;
+    let content_start = header_start + header_end + 2;
+
+    Ok(&contents[content_start..])
+}

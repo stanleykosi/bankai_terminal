@@ -1,0 +1,14 @@
+# /**
+#  * @description
+#  * Git ignore rules for build outputs and cache artifacts.
+#  *
+#  * @dependencies
+#  * - None
+#  *
+#  * @notes
+#  * - Keep this list minimal and focused on generated files.
+#  */
+/target/
+**/__pycache__/
+*.pyc
+config/secrets.enc

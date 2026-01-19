@@ -1,0 +1,36 @@
+# /**
+#  * @description
+#  * Local development services for hot (Redis) and cold (TimescaleDB) storage.
+#  *
+#  * @dependencies
+#  * - docker-compose
+#  * - redis:7-alpine image
+#  * - timescale/timescaledb:latest-pg14 image
+#  *
+#  * @notes
+#  * - Persist data in named volumes for durability across restarts.
+#  */
+version: "3.8"
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  timescaledb:
+    image: timescale/timescaledb:latest-pg14
+    environment:
+      POSTGRES_USER: bankai
+      POSTGRES_PASSWORD: bankai
+      POSTGRES_DB: bankai
+    ports:
+      - "5432:5432"
+    volumes:
+      - timescale_data:/var/lib/postgresql/data
+
+volumes:
+  redis_data:
+  timescale_data:

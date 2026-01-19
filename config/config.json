@@ -1,0 +1,35 @@
+/**
+ * @description
+ * Default runtime configuration for Bankai Terminal.
+ *
+ * @dependencies
+ * - None
+ *
+ * @notes
+ * - Values are placeholders for local development and should be updated.
+ */
+{
+  "endpoints": {
+    "binance_ws": "wss://stream.binance.com:9443/ws",
+    "polymarket_ws": "wss://ws-live-data.polymarket.com",
+    "polymarket_gamma": "https://gamma-api.polymarket.com",
+    "allora_rpc": "https://allora-rpc.testnet.allora.network",
+    "relayer_http": "https://clob.polymarket.com",
+    "polygon_rpc": "https://polygon-rpc.com"
+  },
+  "trading": {
+    "max_volatility": 0.02,
+    "kill_switch_latency_ms": 100,
+    "kill_switch_clock_drift_ms": 10,
+    "kill_switch_consecutive_losses": 5
+  },
+  "strategy": {
+    "kelly_fraction": 0.25,
+    "snipe_min_edge_bps": 200.0,
+    "spread_offset_bps": 15.0
+  },
+  "fees": {
+    "taker_fee_bps": 300.0,
+    "estimated_gas_bps": 20.0
+  }
+}
