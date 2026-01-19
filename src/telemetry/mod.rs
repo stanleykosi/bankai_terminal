@@ -9,3 +9,5 @@
  * - Health monitors should not block the trading engine.
  */
 pub mod health;
+pub mod logging;
+pub mod metrics;

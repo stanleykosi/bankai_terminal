@@ -45,7 +45,7 @@
   - **Step Dependencies**: Step 1
   - **User Instructions**: Install `sqlx-cli` and run `sqlx migrate run`.
 
-- [ ] Step 6: Metrics and Structured Logging
+- [X] Step 6: Metrics and Structured Logging
   - **Task**: enhance telemetry. Implement a metrics module to track critical KPIs: `latency_ms`, `order_fill_rate`, `rail_failover_count`. Ensure all logs include correlation IDs (e.g., `trace_id` for a trade lifecycle).
   - **Files**:
     - `src/telemetry/metrics.rs`: Metric definitions and recording (e.g., using `metrics` crate).

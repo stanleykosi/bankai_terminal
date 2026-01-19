@@ -13,21 +13,12 @@
 use bankai_terminal::config::ConfigManager;
 use bankai_terminal::error::Result;
 use bankai_terminal::security::{self, DEFAULT_SECRETS_PATH};
-use tracing_subscriber::{fmt, EnvFilter};
-
-fn init_logging() {
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-
-    fmt()
-        .with_env_filter(env_filter)
-        .with_target(false)
-        .with_level(true)
-        .init();
-}
+use bankai_terminal::telemetry::{logging, metrics};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    init_logging();
+    logging::init_tracing();
+    metrics::init_metrics();
     tracing::info!("bankai terminal booting");
 
     let config_manager = ConfigManager::new("config/config.json")?;
