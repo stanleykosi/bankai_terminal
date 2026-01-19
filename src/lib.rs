@@ -9,5 +9,8 @@
  * - Keep module exports aligned with the src/ layout.
  */
 pub mod config;
+pub mod engine;
 pub mod error;
 pub mod security;
+pub mod storage;
+pub mod telemetry;

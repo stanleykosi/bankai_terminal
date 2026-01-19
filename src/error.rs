@@ -28,6 +28,12 @@ pub enum BankaiError {
     Argon2(#[from] argon2::Error),
     #[error("base64 error: {0}")]
     Base64(#[from] base64::DecodeError),
+    #[error("http error: {0}")]
+    Http(#[from] reqwest::Error),
+    #[error("redis error: {0}")]
+    Redis(#[from] redis::RedisError),
+    #[error("database error: {0}")]
+    Sqlx(#[from] sqlx::Error),
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
 }

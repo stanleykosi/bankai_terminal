@@ -31,5 +31,11 @@
   "fees": {
     "taker_fee_bps": 300.0,
     "estimated_gas_bps": 20.0
+  },
+  "health": {
+    "clock_drift_check_interval_secs": 30,
+    "time_api_url": null,
+    "time_api_timeout_ms": 1500,
+    "chrony_command": "chronyc"
   }
 }

@@ -27,6 +27,8 @@ pub struct Config {
     pub trading: TradingConfig,
     pub strategy: StrategyConfig,
     pub fees: FeeConfig,
+    #[serde(default)]
+    pub health: HealthConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -58,6 +60,37 @@ pub struct StrategyConfig {
 pub struct FeeConfig {
     pub taker_fee_bps: f64,
     pub estimated_gas_bps: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct HealthConfig {
+    #[serde(default = "default_clock_drift_interval_secs")]
+    pub clock_drift_check_interval_secs: u64,
+    #[serde(default)]
+    pub time_api_url: Option<String>,
+    #[serde(default = "default_time_api_timeout_ms")]
+    pub time_api_timeout_ms: u64,
+    #[serde(default)]
+    pub chrony_command: Option<String>,
+}
+
+impl Default for HealthConfig {
+    fn default() -> Self {
+        Self {
+            clock_drift_check_interval_secs: default_clock_drift_interval_secs(),
+            time_api_url: None,
+            time_api_timeout_ms: default_time_api_timeout_ms(),
+            chrony_command: None,
+        }
+    }
+}
+
+fn default_clock_drift_interval_secs() -> u64 {
+    30
+}
+
+fn default_time_api_timeout_ms() -> u64 {
+    1500
 }
 
 pub struct ConfigManager {

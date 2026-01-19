@@ -28,7 +28,7 @@
   - **Step Dependencies**: Step 1
   - **User Instructions**: Run `cargo run --bin keytool` to generate `secrets.enc` with your credentials.
 
-- [ ] Step 4: Safety Monitors (Kill Switch & Clock Sync)
+- [X] Step 4: Safety Monitors (Kill Switch & Clock Sync)
   - **Task**: Implement the `Health` monitor. Add checks for System Clock Drift (using NTP/Chrony checks or an external time API comparison). Implement the "Kill Switch" logic that monitors global state flags (`Latency`, `Consecutive_Losses`). If thresholds are breached, set a global `HALT` flag that the Engine respects.
   - **Files**:
     - `src/telemetry/health.rs`: Clock drift and system health checks.
@@ -36,7 +36,7 @@
   - **Step Dependencies**: Step 2
 
 ## Phase 2: Storage and Observability
-- [ ] Step 5: Storage Layer (Redis & TimescaleDB)
+- [X] Step 5: Storage Layer (Redis & TimescaleDB)
   - **Task**: Implement `RedisManager` for hot state (order books, nonces, volatility cache) and `DatabaseManager` for persistent storage. Create SQL migrations for `trade_logs` (execution details) and `regret_metrics` (for meta-brain).
   - **Files**:
     - `src/storage/redis.rs`: Redis connection pool and ZSET/HASH helpers.
