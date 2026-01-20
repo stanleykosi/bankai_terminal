@@ -1,0 +1,73 @@
+/**
+ * @purpose
+ * Minimal ABI for the Gnosis Conditional Tokens contract.
+ *
+ * @dependencies
+ * - None (static ABI definition)
+ *
+ * @notes
+ * - Includes ConditionResolution event and redeemPositions function only.
+ */
+{
+  "abi": [
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": true,
+          "internalType": "bytes32",
+          "name": "conditionId",
+          "type": "bytes32"
+        },
+        {
+          "indexed": true,
+          "internalType": "address",
+          "name": "oracle",
+          "type": "address"
+        },
+        {
+          "indexed": true,
+          "internalType": "bytes32",
+          "name": "questionId",
+          "type": "bytes32"
+        },
+        {
+          "indexed": false,
+          "internalType": "uint256",
+          "name": "outcomeSlotCount",
+          "type": "uint256"
+        }
+      ],
+      "name": "ConditionResolution",
+      "type": "event"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "address",
+          "name": "collateralToken",
+          "type": "address"
+        },
+        {
+          "internalType": "bytes32",
+          "name": "parentCollectionId",
+          "type": "bytes32"
+        },
+        {
+          "internalType": "bytes32",
+          "name": "conditionId",
+          "type": "bytes32"
+        },
+        {
+          "internalType": "uint256[]",
+          "name": "indexSets",
+          "type": "uint256[]"
+        }
+      ],
+      "name": "redeemPositions",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    }
+  ]
+}

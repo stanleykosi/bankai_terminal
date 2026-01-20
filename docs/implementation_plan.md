@@ -149,7 +149,7 @@
   - **Step Dependencies**: Step 17, Step 18
 
 ## Phase 7: Resolution, Recovery, and Accounting
-- [ ] Step 20: Resolution Listener & Redemption
+- [X] Step 20: Resolution Listener & Redemption
   - **Task**: Implement `src/accounting/redemption.rs`. Listen for `ConditionResolution` events via WebSocket/Log polling. When resolved, call `redeemPositions` on the Gnosis CTF contract. Update `sys:bankroll:usdc` in Redis immediately upon success.
   - **Files**:
     - `src/accounting/redemption.rs`: Event listener and redemption logic.
