@@ -114,7 +114,7 @@
     - `src/engine/types.rs`: Add `TradeIntent` struct.
   - **Step Dependencies**: Step 8, Step 13
 
-- [ ] Step 15: Order Lifecycle Management
+- [X] Step 15: Order Lifecycle Management
   - **Task**: Implement logic to track active orders. For "Ladder" orders, enforce a cancellation policy (e.g., cancel within 250ms if conditions degrade). Handle FOK emulation if native FOK isn't reliable (Immediate-Or-Cancel or check fill status immediately).
   - **Files**:
     - `src/engine/orders.rs`: Order tracking and lifecycle logic.
