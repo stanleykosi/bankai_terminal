@@ -233,6 +233,13 @@ impl DirectExecutionClient {
         self.exchange_address
     }
 
+    pub async fn fetch_chain_nonce(&self) -> Result<U256> {
+        self.provider
+            .get_transaction_count(self.wallet.address(), None)
+            .await
+            .map_err(|err| BankaiError::Rpc(format!("nonce fetch failed: {err}")))
+    }
+
     pub fn encode_fill_orders(&self, request: &FillOrdersRequest) -> Result<Bytes> {
         let function = self
             .exchange_abi

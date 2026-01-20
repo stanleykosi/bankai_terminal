@@ -1,5 +1,5 @@
 /**
- * @description
+ * @purpose
  * Execution rail modules for signing and nonce coordination.
  *
  * @dependencies
@@ -12,3 +12,4 @@ pub mod nonce;
 pub mod direct;
 pub mod relayer;
 pub mod signer;
+pub mod orchestrator;

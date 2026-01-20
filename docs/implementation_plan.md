@@ -141,7 +141,7 @@
     - `abi/CTFExchange.json`: Contract ABI.
   - **Step Dependencies**: Step 16
 
-- [ ] Step 19: Executor Orchestrator
+- [X] Step 19: Executor Orchestrator
   - **Task**: Create `src/execution/orchestrator.rs`. Listen for `TradeIntent`. Attempt Rail A; if it times out (>500ms) or fails, execute Rail B. Log the execution path and outcome to TimescaleDB.
   - **Files**:
     - `src/execution/orchestrator.rs`: Routing logic.
