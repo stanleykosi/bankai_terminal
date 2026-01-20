@@ -48,5 +48,10 @@
     "time_api_url": null,
     "time_api_timeout_ms": 1500,
     "chrony_command": "chronyc"
+  },
+  "preflight": {
+    "enabled": true,
+    "fail_fast": true,
+    "timeout_ms": 3000
   }
 }

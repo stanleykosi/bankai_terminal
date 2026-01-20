@@ -7,5 +7,7 @@
  *
  * @notes
  * - Redemption handles post-resolution capital recycling.
+ * - Recovery rehydrates balances and open orders on startup.
  */
 pub mod redemption;
+pub mod recovery;

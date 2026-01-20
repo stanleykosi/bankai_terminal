@@ -156,7 +156,7 @@
     - `abi/ConditionalTokens.json`: Contract ABI.
   - **Step Dependencies**: Step 18
 
-- [ ] Step 21: Startup Recovery
+- [X] Step 21: Startup Recovery
   - **Task**: Implement `src/accounting/recovery.rs`. On application boot, query the blockchain for Open Orders and current Token Balances. Reconcile this data with Redis to ensure the local state matches the chain state.
   - **Files**:
     - `src/accounting/recovery.rs`: Recovery logic.

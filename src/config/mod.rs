@@ -32,6 +32,8 @@ pub struct Config {
     #[serde(default)]
     pub health: HealthConfig,
     #[serde(default)]
+    pub preflight: PreflightConfig,
+    #[serde(default)]
     pub allora_consumer: Option<AlloraConsumerConfig>,
 }
 
@@ -130,12 +132,44 @@ impl Default for HealthConfig {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct PreflightConfig {
+    #[serde(default = "default_preflight_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_preflight_fail_fast")]
+    pub fail_fast: bool,
+    #[serde(default = "default_preflight_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+impl Default for PreflightConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_preflight_enabled(),
+            fail_fast: default_preflight_fail_fast(),
+            timeout_ms: default_preflight_timeout_ms(),
+        }
+    }
+}
+
 fn default_clock_drift_interval_secs() -> u64 {
     30
 }
 
 fn default_time_api_timeout_ms() -> u64 {
     1500
+}
+
+fn default_preflight_enabled() -> bool {
+    true
+}
+
+fn default_preflight_fail_fast() -> bool {
+    true
+}
+
+fn default_preflight_timeout_ms() -> u64 {
+    3_000
 }
 
 fn default_polymarket_ping_interval_secs() -> u64 {

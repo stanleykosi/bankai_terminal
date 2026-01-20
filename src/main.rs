@@ -1,5 +1,5 @@
 /**
- * @description
+ * @purpose
  * Bankai Terminal entry point that bootstraps the async runtime and logging.
  *
  * @dependencies
@@ -9,7 +9,9 @@
  *
  * @notes
  * - Logging defaults to info unless RUST_LOG is set.
+ * - Startup recovery reconciles balances and open orders before trading.
  */
+use bankai_terminal::accounting::recovery::StartupRecovery;
 use bankai_terminal::config::{Config, ConfigManager};
 use bankai_terminal::engine::core::EngineCore;
 use bankai_terminal::engine::risk::{KillSwitchConfig, RiskState};
@@ -20,12 +22,12 @@ use bankai_terminal::oracle::polymarket_discovery::{
     PolymarketDiscovery, PolymarketDiscoveryConfig,
 };
 use bankai_terminal::oracle::polymarket_rtds::{PolymarketRtds, PolymarketRtdsConfig};
-use bankai_terminal::error::Result;
+use bankai_terminal::error::{BankaiError, Result};
 use bankai_terminal::security::{self, DEFAULT_SECRETS_PATH};
 use bankai_terminal::storage::orderbook::OrderBookStore;
 use bankai_terminal::storage::redis::RedisManager;
 use bankai_terminal::telemetry::health::HealthMonitor;
-use bankai_terminal::telemetry::{logging, metrics};
+use bankai_terminal::telemetry::{logging, metrics, preflight};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
@@ -42,8 +44,43 @@ async fn main() -> Result<()> {
     let config = config_manager.current();
 
     tracing::info!(?config, "config loaded");
-    let _secrets = security::load_secrets_interactive(DEFAULT_SECRETS_PATH)?;
+    let secrets = security::load_secrets_interactive(DEFAULT_SECRETS_PATH)?;
     tracing::info!("secrets loaded");
+
+    if config.preflight.enabled {
+        let report = preflight::run(&config).await?;
+        preflight::log_report(&report);
+        if config.preflight.fail_fast && report.has_failures() {
+            return Err(BankaiError::InvalidArgument(
+                "startup preflight checks failed".to_string(),
+            ));
+        }
+    } else {
+        tracing::info!("startup preflight checks disabled");
+    }
+
+    if let Ok(redis_url) = std::env::var("REDIS_URL") {
+        match RedisManager::new(&redis_url).await {
+            Ok(redis) => match StartupRecovery::from_env(&config, &secrets, redis) {
+                Ok(Some(recovery)) => {
+                    if let Err(error) = recovery.run().await {
+                        tracing::warn!(?error, "startup recovery failed");
+                    }
+                }
+                Ok(None) => {
+                    tracing::info!("startup recovery skipped");
+                }
+                Err(error) => {
+                    tracing::warn!(?error, "startup recovery initialization failed");
+                }
+            },
+            Err(error) => {
+                tracing::warn!(?error, "redis unavailable; skipping startup recovery");
+            }
+        }
+    } else {
+        tracing::warn!("REDIS_URL not set; startup recovery skipped");
+    }
 
     let risk = Arc::new(RiskState::new(KillSwitchConfig::from_trading(
         &config.trading,
