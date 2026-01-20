@@ -100,7 +100,7 @@
   - **Step Dependencies**: Step 5
 
 ## Phase 5: Velocity Execution Engine
-- [ ] Step 13: Core Engine Event Loop
+- [X] Step 13: Core Engine Event Loop
   - **Task**: Create `src/engine/core.rs`. Implement the main `tokio::select!` loop that consumes messages from all oracles. Integrate the `Risk` module (Step 4) to halt trading if volatility is high or the kill switch is active.
   - **Files**:
     - `src/engine/core.rs`: Main orchestrator loop.

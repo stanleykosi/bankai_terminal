@@ -36,6 +36,10 @@ impl OrderBookStore {
         Self { redis }
     }
 
+    pub async fn load_polymarket_asset_ids(&self) -> Result<Vec<String>> {
+        self.redis.get_polymarket_asset_ids().await
+    }
+
     pub async fn reset_book(&self, token_id: &str) -> Result<()> {
         let bids_key = bids_key(token_id);
         let asks_key = asks_key(token_id);

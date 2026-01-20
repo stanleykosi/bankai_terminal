@@ -32,6 +32,13 @@
     "taker_fee_bps": 300.0,
     "estimated_gas_bps": 20.0
   },
+  "polymarket": {
+    "asset_ids": [],
+    "asset_refresh_interval_secs": 5,
+    "ping_interval_secs": 10,
+    "reconnect_delay_secs": 3,
+    "snapshot_timeout_ms": 10000
+  },
   "allora_consumer": {
     "base_url": "https://api.allora.network/v2/allora/consumer",
     "chain": "price/ethereum-11155111",

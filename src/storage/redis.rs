@@ -18,6 +18,8 @@ pub struct RedisManager {
     connection: ConnectionManager,
 }
 
+const POLYMARKET_ASSET_IDS_KEY: &str = "polymarket:asset_ids";
+
 impl RedisManager {
     pub async fn new(redis_url: &str) -> Result<Self> {
         let client = redis::Client::open(redis_url)?;
@@ -101,6 +103,31 @@ impl RedisManager {
             .await?;
         conn.hset::<_, _, _, ()>(key.as_str(), "minTickSize", min_tick_size)
             .await?;
+        Ok(())
+    }
+
+    pub async fn set_polymarket_asset_ids(&self, asset_ids: &[String]) -> Result<()> {
+        self.replace_set(POLYMARKET_ASSET_IDS_KEY, asset_ids)
+            .await
+    }
+
+    pub async fn get_polymarket_asset_ids(&self) -> Result<Vec<String>> {
+        self.smembers(POLYMARKET_ASSET_IDS_KEY).await
+    }
+
+    pub async fn smembers(&self, key: &str) -> Result<Vec<String>> {
+        let mut conn = self.connection.clone();
+        Ok(conn.smembers(key).await?)
+    }
+
+    pub async fn replace_set(&self, key: &str, values: &[String]) -> Result<()> {
+        let mut conn = self.connection.clone();
+        let mut pipe = redis::pipe();
+        pipe.del(key);
+        if !values.is_empty() {
+            pipe.sadd(key, values);
+        }
+        pipe.query_async::<_, ()>(&mut conn).await?;
         Ok(())
     }
 }

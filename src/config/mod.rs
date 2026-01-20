@@ -28,6 +28,8 @@ pub struct Config {
     pub strategy: StrategyConfig,
     pub fees: FeeConfig,
     #[serde(default)]
+    pub polymarket: PolymarketConfig,
+    #[serde(default)]
     pub health: HealthConfig,
     #[serde(default)]
     pub allora_consumer: Option<AlloraConsumerConfig>,
@@ -62,6 +64,32 @@ pub struct StrategyConfig {
 pub struct FeeConfig {
     pub taker_fee_bps: f64,
     pub estimated_gas_bps: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PolymarketConfig {
+    #[serde(default)]
+    pub asset_ids: Vec<String>,
+    #[serde(default = "default_polymarket_asset_refresh_interval_secs")]
+    pub asset_refresh_interval_secs: u64,
+    #[serde(default = "default_polymarket_ping_interval_secs")]
+    pub ping_interval_secs: u64,
+    #[serde(default = "default_polymarket_reconnect_delay_secs")]
+    pub reconnect_delay_secs: u64,
+    #[serde(default = "default_polymarket_snapshot_timeout_ms")]
+    pub snapshot_timeout_ms: u64,
+}
+
+impl Default for PolymarketConfig {
+    fn default() -> Self {
+        Self {
+            asset_ids: Vec::new(),
+            asset_refresh_interval_secs: default_polymarket_asset_refresh_interval_secs(),
+            ping_interval_secs: default_polymarket_ping_interval_secs(),
+            reconnect_delay_secs: default_polymarket_reconnect_delay_secs(),
+            snapshot_timeout_ms: default_polymarket_snapshot_timeout_ms(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -108,6 +136,22 @@ fn default_clock_drift_interval_secs() -> u64 {
 
 fn default_time_api_timeout_ms() -> u64 {
     1500
+}
+
+fn default_polymarket_ping_interval_secs() -> u64 {
+    10
+}
+
+fn default_polymarket_asset_refresh_interval_secs() -> u64 {
+    5
+}
+
+fn default_polymarket_reconnect_delay_secs() -> u64 {
+    3
+}
+
+fn default_polymarket_snapshot_timeout_ms() -> u64 {
+    10_000
 }
 
 pub struct ConfigManager {

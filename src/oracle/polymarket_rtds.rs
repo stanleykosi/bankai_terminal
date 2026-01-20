@@ -36,6 +36,7 @@ pub struct PolymarketRtdsConfig {
     pub ws_endpoint: String,
     pub rest_endpoint: String,
     pub asset_ids: Vec<String>,
+    pub asset_refresh_interval: Duration,
     pub ping_interval: Duration,
     pub reconnect_delay: Duration,
     pub snapshot_timeout: Duration,
@@ -48,6 +49,7 @@ impl PolymarketRtdsConfig {
             ws_endpoint,
             rest_endpoint,
             asset_ids,
+            asset_refresh_interval: Duration::from_secs(5),
             ping_interval: DEFAULT_PING_INTERVAL,
             reconnect_delay: DEFAULT_RECONNECT_DELAY,
             snapshot_timeout: DEFAULT_SNAPSHOT_TIMEOUT,
@@ -83,27 +85,41 @@ impl PolymarketRtds {
     }
 
     async fn run(self) -> Result<()> {
-        if self.config.asset_ids.is_empty() {
-            return Err(BankaiError::InvalidArgument(
-                "polymarket rtds requires asset_ids".to_string(),
-            ));
-        }
-
         loop {
-            if let Err(error) = self.seed_snapshots().await {
+            let asset_ids = self.resolve_asset_ids().await?;
+            if asset_ids.is_empty() {
+                tracing::warn!("polymarket rtds has no asset ids; retrying");
+                tokio::time::sleep(self.config.reconnect_delay).await;
+                continue;
+            }
+
+            if let Err(error) = self.seed_snapshots(&asset_ids).await {
                 tracing::warn!(?error, "polymarket snapshot seed failed");
             }
 
-            if let Err(error) = self.connect_and_stream().await {
-                tracing::warn!(?error, "polymarket rtds stream error");
+            match self.connect_and_stream(&asset_ids).await {
+                Ok(StreamOutcome::Resubscribe) => {
+                    continue;
+                }
+                Ok(StreamOutcome::Backoff) => {}
+                Err(error) => {
+                    tracing::warn!(?error, "polymarket rtds stream error");
+                }
             }
 
             tokio::time::sleep(self.config.reconnect_delay).await;
         }
     }
 
-    async fn seed_snapshots(&self) -> Result<()> {
-        for asset_id in &self.config.asset_ids {
+    async fn resolve_asset_ids(&self) -> Result<Vec<String>> {
+        if !self.config.asset_ids.is_empty() {
+            return Ok(self.config.asset_ids.clone());
+        }
+        self.orderbook.load_polymarket_asset_ids().await
+    }
+
+    async fn seed_snapshots(&self, asset_ids: &[String]) -> Result<()> {
+        for asset_id in asset_ids {
             match self.fetch_snapshot(asset_id).await {
                 Ok(snapshot) => {
                     self.orderbook
@@ -133,18 +149,30 @@ impl PolymarketRtds {
         parse_snapshot(&parsed)
     }
 
-    async fn connect_and_stream(&self) -> Result<()> {
+    async fn connect_and_stream(&self, asset_ids: &[String]) -> Result<StreamOutcome> {
         let (ws_stream, _) = tokio_tungstenite::connect_async(&self.config.ws_endpoint).await?;
         let (mut writer, mut reader) = ws_stream.split();
-        let payload =
-            build_subscription_payload(&self.config.asset_ids, self.config.auth.as_ref())?;
+        let payload = build_subscription_payload(asset_ids, self.config.auth.as_ref())?;
         writer.send(Message::Text(payload)).await?;
 
         let mut ping_interval = tokio::time::interval(self.config.ping_interval);
+        let mut refresh_interval = tokio::time::interval(self.config.asset_refresh_interval);
+        let dynamic_assets = self.config.asset_ids.is_empty();
+        let mut current_assets = asset_ids.to_vec();
         loop {
             tokio::select! {
                 _ = ping_interval.tick() => {
                     writer.send(Message::Text("PING".to_string())).await?;
+                }
+                _ = refresh_interval.tick() => {
+                    if dynamic_assets {
+                        let latest = self.orderbook.load_polymarket_asset_ids().await?;
+                        if !latest.is_empty() && asset_ids_changed(&current_assets, &latest) {
+                            tracing::info!("polymarket asset ids updated; resubscribing");
+                            return Ok(StreamOutcome::Resubscribe);
+                        }
+                        current_assets = latest;
+                    }
                 }
                 message = reader.next() => {
                     match message {
@@ -165,7 +193,7 @@ impl PolymarketRtds {
             }
         }
 
-        Ok(())
+        Ok(StreamOutcome::Backoff)
     }
 
     async fn handle_message(&self, text: &str) -> Result<()> {
@@ -192,6 +220,12 @@ struct PriceChange {
     price: String,
     size: f64,
     side: BookSide,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum StreamOutcome {
+    Resubscribe,
+    Backoff,
 }
 
 fn build_subscription_payload(
@@ -336,4 +370,15 @@ fn parse_string(value: Option<&Value>, field: &str) -> Result<String> {
     Err(BankaiError::InvalidArgument(format!(
         "{field} invalid"
     )))
+}
+
+fn asset_ids_changed(current: &[String], latest: &[String]) -> bool {
+    if current.len() != latest.len() {
+        return true;
+    }
+    let mut current_sorted = current.to_vec();
+    let mut latest_sorted = latest.to_vec();
+    current_sorted.sort();
+    latest_sorted.sort();
+    current_sorted != latest_sorted
 }

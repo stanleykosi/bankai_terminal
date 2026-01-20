@@ -12,6 +12,7 @@
  */
 use reqwest::Client;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::error::Result;
@@ -79,6 +80,7 @@ impl PolymarketDiscovery {
 
     async fn refresh_markets(&self) -> Result<()> {
         let mut offset = 0usize;
+        let mut asset_ids = HashSet::new();
         loop {
             let markets = self.fetch_markets(offset).await?;
             if markets.is_empty() {
@@ -95,6 +97,9 @@ impl PolymarketDiscovery {
                             metadata.min_tick_size,
                         )
                         .await?;
+                    for asset_id in extract_market_asset_ids(market) {
+                        asset_ids.insert(asset_id);
+                    }
                 }
             }
 
@@ -103,6 +108,9 @@ impl PolymarketDiscovery {
             }
             offset += self.config.limit;
         }
+        let mut asset_ids: Vec<String> = asset_ids.into_iter().collect();
+        asset_ids.sort();
+        self.redis.set_polymarket_asset_ids(&asset_ids).await?;
         Ok(())
     }
 
@@ -243,6 +251,60 @@ fn parse_numeric(value: &Value) -> Option<f64> {
         }
     }
     None
+}
+
+fn extract_market_asset_ids(market: &Value) -> Vec<String> {
+    let candidates = [
+        "clobTokenIds",
+        "clob_token_ids",
+        "tokenIds",
+        "token_ids",
+        "assetIds",
+        "asset_ids",
+    ];
+    let mut ids = Vec::new();
+    for key in candidates {
+        if let Some(value) = market.get(key) {
+            parse_token_field(value, &mut ids);
+        }
+    }
+    ids
+}
+
+fn parse_token_field(value: &Value, output: &mut Vec<String>) {
+    match value {
+        Value::Array(entries) => {
+            for entry in entries {
+                match entry {
+                    Value::String(text) => push_token_id(text, output),
+                    Value::Number(num) => output.push(num.to_string()),
+                    _ => {}
+                }
+            }
+        }
+        Value::String(text) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                return;
+            }
+            if let Ok(parsed) = serde_json::from_str::<Value>(trimmed) {
+                parse_token_field(&parsed, output);
+            } else {
+                for part in trimmed.split(',') {
+                    push_token_id(part.trim(), output);
+                }
+            }
+        }
+        Value::Number(num) => output.push(num.to_string()),
+        _ => {}
+    }
+}
+
+fn push_token_id(value: &str, output: &mut Vec<String>) {
+    let trimmed = value.trim();
+    if !trimmed.is_empty() {
+        output.push(trimmed.to_string());
+    }
 }
 
 fn compute_jitter(max_ms: u64) -> Result<Duration> {
