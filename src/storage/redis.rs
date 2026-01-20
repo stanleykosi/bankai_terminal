@@ -18,6 +18,14 @@ pub struct RedisManager {
     connection: ConnectionManager,
 }
 
+impl std::fmt::Debug for RedisManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RedisManager")
+            .field("connection", &"<redis::aio::ConnectionManager>")
+            .finish()
+    }
+}
+
 const POLYMARKET_ASSET_IDS_KEY: &str = "polymarket:asset_ids";
 
 impl RedisManager {

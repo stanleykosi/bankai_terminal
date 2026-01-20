@@ -121,7 +121,7 @@
   - **Step Dependencies**: Step 13
 
 ## Phase 6: Dual-Rail Execution
-- [ ] Step 16: Signer & Nonce Management
+- [X] Step 16: Signer & Nonce Management
   - **Task**: Implement `src/execution/signer.rs` for EIP-712 signing. Implement `src/execution/nonce.rs` for atomic nonce management using Redis Lua scripts/Mutex. Support "Replace-By-Fee" logic (tracking nonces to bump gas if stuck).
   - **Files**:
     - `src/execution/signer.rs`: Ethers-rs signing logic.
