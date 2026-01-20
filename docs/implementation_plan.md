@@ -128,7 +128,7 @@
     - `src/execution/nonce.rs`: Redis nonce manager.
   - **Step Dependencies**: Step 3, Step 5
 
-- [ ] Step 17: Rail A - The Relayer
+- [X] Step 17: Rail A - The Relayer
   - **Task**: Implement `src/execution/relayer.rs` to POST orders to the Polymarket Relayer API. Implement latency tracking and specific error handling (detecting congestion/5xx errors) to trigger failover.
   - **Files**:
     - `src/execution/relayer.rs`: HTTP Relayer client.
