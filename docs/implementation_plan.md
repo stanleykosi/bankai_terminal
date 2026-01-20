@@ -107,7 +107,7 @@
     - `src/main.rs`: Wire up Oracles to Engine.
   - **Step Dependencies**: Step 9, Step 10, Step 12
 
-- [ ] Step 14: Trade Opportunity Analysis
+- [X] Step 14: Trade Opportunity Analysis
   - **Task**: Implement `src/engine/analysis.rs`. Calculate Implied Probabilities vs True Probabilities (Binance + Allora). Compute `Edge`. Determine `TradeIntent` (Snipe vs Ladder) based on thresholds and fees. Enforce: `Edge > (Taker_Fee + Gas + 2%)` for Snipes.
   - **Files**:
     - `src/engine/analysis.rs`: EV and decision logic.

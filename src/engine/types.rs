@@ -14,6 +14,25 @@ pub enum MarketUpdate {
     Allora(AlloraMarketUpdate),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TradeMode {
+    Ladder,
+    Snipe,
+}
+
+#[derive(Debug, Clone)]
+pub struct TradeIntent {
+    pub market_id: String,
+    pub asset_id: String,
+    pub mode: TradeMode,
+    pub implied_prob: f64,
+    pub true_prob: f64,
+    pub edge: f64,
+    pub edge_bps: f64,
+    pub spread_offset_bps: f64,
+    pub timestamp_ms: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct BinanceMarketUpdate {
     pub asset: String,
