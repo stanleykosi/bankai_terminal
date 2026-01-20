@@ -40,6 +40,8 @@ pub enum BankaiError {
     Websocket(#[from] tokio_tungstenite::tungstenite::Error),
     #[error("time error: {0}")]
     Time(#[from] std::time::SystemTimeError),
+    #[error("rpc error: {0}")]
+    Rpc(String),
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
 }

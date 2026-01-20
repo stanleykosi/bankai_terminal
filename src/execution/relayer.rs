@@ -9,7 +9,11 @@
  *
  * @notes
  * - Congestion and 5xx errors are classified for rail failover decisions.
+ * - Builder headers are computed from the exact request body string when credentials are provided.
  */
+use base64::engine::general_purpose;
+use base64::Engine as _;
+use hmac::{Hmac, Mac};
 use reqwest::header::{HeaderMap, HeaderValue};
 use reqwest::{Client, StatusCode};
 use serde_json::Value;
@@ -21,10 +25,18 @@ use crate::telemetry::metrics;
 const DEFAULT_ORDER_PATH: &str = "/order";
 const DEFAULT_TIMEOUT_MS: u64 = 500;
 
+const HEADER_POLY_ADDRESS: &str = "POLY_ADDRESS";
+const HEADER_POLY_API_KEY: &str = "POLY_API_KEY";
+const HEADER_POLY_PASSPHRASE: &str = "POLY_PASSPHRASE";
+const HEADER_POLY_SIGNATURE: &str = "POLY_SIGNATURE";
+const HEADER_POLY_TIMESTAMP: &str = "POLY_TIMESTAMP";
+
 const HEADER_BUILDER_API_KEY: &str = "POLY_BUILDER_API_KEY";
 const HEADER_BUILDER_TIMESTAMP: &str = "POLY_BUILDER_TIMESTAMP";
 const HEADER_BUILDER_PASSPHRASE: &str = "POLY_BUILDER_PASSPHRASE";
 const HEADER_BUILDER_SIGNATURE: &str = "POLY_BUILDER_SIGNATURE";
+
+type HmacSha256 = Hmac<sha2::Sha256>;
 
 #[derive(Debug, Clone)]
 pub struct RelayerConfig {
@@ -45,10 +57,34 @@ impl RelayerConfig {
 
 #[derive(Debug, Clone)]
 pub struct RelayerAuth {
-    pub builder_api_key: String,
-    pub builder_timestamp: String,
-    pub builder_passphrase: String,
-    pub builder_signature: String,
+    pub address: String,
+    pub api_key: String,
+    pub passphrase: String,
+    pub signature: String,
+    pub timestamp: String,
+    pub builder: Option<RelayerBuilderAuth>,
+}
+
+#[derive(Debug, Clone)]
+pub enum RelayerBuilderAuth {
+    Credentials(RelayerBuilderCredentials),
+    Headers(RelayerBuilderHeaders),
+}
+
+#[derive(Debug, Clone)]
+pub struct RelayerBuilderCredentials {
+    pub api_key: String,
+    pub secret: String,
+    pub passphrase: String,
+    pub timestamp: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RelayerBuilderHeaders {
+    pub api_key: String,
+    pub timestamp: String,
+    pub passphrase: String,
+    pub signature: String,
 }
 
 #[derive(Debug, Clone)]
@@ -171,9 +207,15 @@ impl RelayerClient {
         auth: Option<&RelayerAuth>,
     ) -> RelayerResult<RelayerResponse> {
         let url = self.order_url();
-        let mut request = self.client.post(url).json(payload);
+        let body = serde_json::to_string(payload)
+            .map_err(|err| RelayerError::invalid_request(format!("payload json error: {err}")))?;
+        let mut request = self
+            .client
+            .post(url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body.clone());
         if let Some(auth) = auth {
-            request = apply_auth_headers(request, auth)?;
+            request = apply_auth_headers(request, auth, &self.order_path(), &body)?;
         }
 
         let start = Instant::now();
@@ -207,30 +249,112 @@ impl RelayerClient {
         let path = self.config.order_path.trim_start_matches('/');
         format!("{base}/{path}")
     }
+
+    fn order_path(&self) -> String {
+        let path = self.config.order_path.trim();
+        if path.starts_with('/') {
+            path.to_string()
+        } else {
+            format!("/{path}")
+        }
+    }
 }
 
 fn apply_auth_headers(
     request: reqwest::RequestBuilder,
     auth: &RelayerAuth,
+    path: &str,
+    body: &str,
 ) -> RelayerResult<reqwest::RequestBuilder> {
     let mut headers = HeaderMap::new();
-    headers.insert(
-        HEADER_BUILDER_API_KEY,
-        header_value(&auth.builder_api_key)?,
-    );
-    headers.insert(
-        HEADER_BUILDER_TIMESTAMP,
-        header_value(&auth.builder_timestamp)?,
-    );
+    headers.insert(HEADER_POLY_ADDRESS, header_value(&auth.address)?);
+    headers.insert(HEADER_POLY_API_KEY, header_value(&auth.api_key)?);
+    headers.insert(HEADER_POLY_PASSPHRASE, header_value(&auth.passphrase)?);
+    headers.insert(HEADER_POLY_SIGNATURE, header_value(&auth.signature)?);
+    headers.insert(HEADER_POLY_TIMESTAMP, header_value(&auth.timestamp)?);
+
+    apply_builder_headers(&mut headers, auth, path, body)?;
+
+    Ok(request.headers(headers))
+}
+
+fn apply_builder_headers(
+    headers: &mut HeaderMap,
+    auth: &RelayerAuth,
+    path: &str,
+    body: &str,
+) -> RelayerResult<()> {
+    let Some(builder) = auth.builder.as_ref() else {
+        return Ok(());
+    };
+
+    let payload = match builder {
+        RelayerBuilderAuth::Headers(payload) => payload.clone(),
+        RelayerBuilderAuth::Credentials(credentials) => {
+            build_builder_headers(credentials, "POST", path, body)?
+        }
+    };
+
+    headers.insert(HEADER_BUILDER_API_KEY, header_value(&payload.api_key)?);
     headers.insert(
         HEADER_BUILDER_PASSPHRASE,
-        header_value(&auth.builder_passphrase)?,
+        header_value(&payload.passphrase)?,
     );
     headers.insert(
         HEADER_BUILDER_SIGNATURE,
-        header_value(&auth.builder_signature)?,
+        header_value(&payload.signature)?,
     );
-    Ok(request.headers(headers))
+    headers.insert(
+        HEADER_BUILDER_TIMESTAMP,
+        header_value(&payload.timestamp)?,
+    );
+
+    Ok(())
+}
+
+fn build_builder_headers(
+    credentials: &RelayerBuilderCredentials,
+    method: &str,
+    path: &str,
+    body: &str,
+) -> RelayerResult<RelayerBuilderHeaders> {
+    let timestamp = credentials
+        .timestamp
+        .unwrap_or_else(current_unix_timestamp);
+    let signature = build_builder_signature(&credentials.secret, timestamp, method, path, body)?;
+    Ok(RelayerBuilderHeaders {
+        api_key: credentials.api_key.clone(),
+        passphrase: credentials.passphrase.clone(),
+        signature,
+        timestamp: timestamp.to_string(),
+    })
+}
+
+fn build_builder_signature(
+    secret: &str,
+    timestamp: u64,
+    method: &str,
+    path: &str,
+    body: &str,
+) -> RelayerResult<String> {
+    let key = general_purpose::STANDARD
+        .decode(secret)
+        .map_err(|err| RelayerError::invalid_request(format!("builder secret decode error: {err}")))?;
+    let message = format!("{timestamp}{method}{path}{body}");
+    let mut mac = HmacSha256::new_from_slice(&key).map_err(|_| {
+        RelayerError::invalid_request("builder secret is invalid for hmac")
+    })?;
+    mac.update(message.as_bytes());
+    let result = mac.finalize().into_bytes();
+    let signature = general_purpose::STANDARD.encode(result);
+    Ok(signature.replace('+', "-").replace('/', "_"))
+}
+
+fn current_unix_timestamp() -> u64 {
+    let duration = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    duration.as_secs()
 }
 
 fn header_value(value: &str) -> RelayerResult<HeaderValue> {

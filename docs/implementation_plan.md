@@ -134,7 +134,7 @@
     - `src/execution/relayer.rs`: HTTP Relayer client.
   - **Step Dependencies**: Step 16
 
-- [ ] Step 18: Rail B - Direct Contract
+- [X] Step 18: Rail B - Direct Contract
   - **Task**: Implement `src/execution/direct.rs`. Load `CTFExchange` ABI. Construct raw transactions calling `fillOrders`. Use a trusted RPC provider (e.g., Alchemy) config. Support Flashbots/Private RPC headers if configured.
   - **Files**:
     - `src/execution/direct.rs`: Direct blockchain interaction.

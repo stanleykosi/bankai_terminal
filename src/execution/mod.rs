@@ -9,5 +9,6 @@
  * - Keep execution helpers focused on signing and chain state.
  */
 pub mod nonce;
+pub mod direct;
 pub mod relayer;
 pub mod signer;

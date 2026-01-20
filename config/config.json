@@ -1,13 +1,3 @@
-/**
- * @description
- * Default runtime configuration for Bankai Terminal.
- *
- * @dependencies
- * - None
- *
- * @notes
- * - Values are placeholders for local development and should be updated.
- */
 {
   "endpoints": {
     "binance_ws": "wss://stream.binance.com:9443/ws",

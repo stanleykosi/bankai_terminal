@@ -36,7 +36,7 @@ argon2 = { version = "0.5", features = ["std"] }
 base64 = "0.21"
 secrecy = "0.8"
 rpassword = "7.3"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
 metrics = "0.21"
 uuid = { version = "1.7", features = ["v4"] }
 pyo3 = { version = "0.21", features = ["auto-initialize"] }
@@ -44,3 +44,6 @@ tokio-tungstenite = "0.21"
 futures-util = "0.3"
 ethers-core = { version = "2.0", features = ["eip712"] }
 ethers-signers = "2.0"
+ethers-providers = "2.0"
+hmac = "0.12"
+sha2 = "0.10"
