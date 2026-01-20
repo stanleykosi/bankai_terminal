@@ -164,7 +164,7 @@
   - **Step Dependencies**: Step 5, Step 18
 
 ## Phase 8: Meta-Brain and HUD
-- [ ] Step 22: Meta-Brain (Self-Learning Script)
+- [X] Step 22: Meta-Brain (Self-Learning Script)
   - **Task**: Implement `python/meta_brain.py`. Query `trade_logs` from TimescaleDB. Analyze "Regret" (optimal decision vs actual). Adjust `Snipe_Threshold` and `Kelly_Fraction` in `config/strategies.json`. Ensure the Rust engine hot-reloads these changes.
   - **Files**:
     - `python/meta_brain.py`: Analysis script.

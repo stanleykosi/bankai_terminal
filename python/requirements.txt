@@ -5,10 +5,12 @@
 #  * @dependencies
 #  * - numpy: numeric computation
 #  * - pandas: data wrangling
+#  * - psycopg: TimescaleDB access
 #  *
 #  * @notes
 #  * - Install with `pip install -r python/requirements.txt`.
 #  */
 numpy
 pandas
+psycopg[binary]
 pytest

@@ -9,6 +9,7 @@
  * - Volatility halts are enforced when signals are neutral or missing.
  * - Uses RiskState to respect kill switch conditions.
  */
+use arc_swap::ArcSwap;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -25,12 +26,12 @@ const ENGINE_TICK_INTERVAL: Duration = Duration::from_secs(5);
 const NEUTRAL_SIGNAL_THRESHOLD_PCT: f64 = 0.001;
 
 pub struct EngineCore {
-    config: Arc<Config>,
+    config: Arc<ArcSwap<Config>>,
     risk: Arc<RiskState>,
 }
 
 impl EngineCore {
-    pub fn new(config: Arc<Config>, risk: Arc<RiskState>) -> Self {
+    pub fn new(config: Arc<ArcSwap<Config>>, risk: Arc<RiskState>) -> Self {
         Self { config, risk }
     }
 
@@ -83,6 +84,7 @@ impl EngineCore {
         state: &mut EngineState,
         update: BinanceMarketUpdate,
     ) -> Result<()> {
+        let config = self.config.load_full();
         self.record_latency(update.event_time_ms)?;
         state.last_binance.insert(update.asset.clone(), update.clone());
 
@@ -92,7 +94,7 @@ impl EngineCore {
         }
 
         if let Some(volatility) = update.volatility_1m {
-            if volatility > self.config.trading.max_volatility {
+            if volatility > config.trading.max_volatility {
                 let is_neutral = is_neutral_signal(
                     state.last_allora.get(&update.asset),
                     resolve_price(&update),

@@ -41,6 +41,7 @@ async fn main() -> Result<()> {
 
     let config_manager = ConfigManager::new("config/config.json")?;
     let _watcher = config_manager.spawn_watcher()?;
+    let config_state = config_manager.state();
     let config = config_manager.current();
 
     tracing::info!(?config, "config loaded");
@@ -88,7 +89,7 @@ async fn main() -> Result<()> {
     let _health = HealthMonitor::from_config(risk.clone(), &config.health)?.spawn();
 
     let (market_tx, _) = broadcast::channel(1024);
-    let engine = EngineCore::new(config.clone(), risk.clone());
+    let engine = EngineCore::new(config_state, risk.clone());
     let _engine_handle = engine.spawn(market_tx.subscribe());
 
     spawn_binance_oracle(&config, market_tx.clone());

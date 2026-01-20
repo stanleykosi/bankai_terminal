@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "updated_at": "2024-01-01T00:00:00Z",
+  "strategy": {
+    "kelly_fraction": 0.25,
+    "snipe_min_edge_bps": 200.0,
+    "spread_offset_bps": 15.0
+  }
+}

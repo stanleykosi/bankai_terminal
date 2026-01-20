@@ -63,6 +63,23 @@ pub struct StrategyConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum StrategyOverrideFile {
+    Wrapped(StrategyOverrideWrapper),
+    Direct(StrategyConfig),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+struct StrategyOverrideWrapper {
+    #[serde(default)]
+    version: Option<u64>,
+    #[serde(default)]
+    updated_at: Option<String>,
+    strategy: StrategyConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct FeeConfig {
     pub taker_fee_bps: f64,
     pub estimated_gas_bps: f64,
@@ -190,15 +207,25 @@ fn default_polymarket_snapshot_timeout_ms() -> u64 {
 
 pub struct ConfigManager {
     path: PathBuf,
+    strategies_path: Option<PathBuf>,
     state: Arc<ArcSwap<Config>>,
 }
 
 impl ConfigManager {
     pub fn new(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
-        let config = load_config(&path)?;
+        let strategies_path = path.parent().map(|parent| parent.join("strategies.json"));
+        Self::new_with_strategy_override(path, strategies_path)
+    }
+
+    pub fn new_with_strategy_override(
+        path: PathBuf,
+        strategies_path: Option<PathBuf>,
+    ) -> Result<Self> {
+        let config = load_config_with_strategy_override(&path, strategies_path.as_deref())?;
         Ok(Self {
             path,
+            strategies_path,
             state: Arc::new(ArcSwap::from_pointee(config)),
         })
     }
@@ -207,12 +234,17 @@ impl ConfigManager {
         self.state.load_full()
     }
 
+    pub fn state(&self) -> Arc<ArcSwap<Config>> {
+        Arc::clone(&self.state)
+    }
+
     pub fn spawn_watcher(&self) -> Result<tokio::task::JoinHandle<()>> {
         let path = self.path.clone();
+        let strategies_path = self.strategies_path.clone();
         let state = Arc::clone(&self.state);
 
         Ok(tokio::task::spawn_blocking(move || {
-            if let Err(error) = watch_loop(&path, state) {
+            if let Err(error) = watch_loop(&path, strategies_path.as_deref(), state) {
                 tracing::error!(?error, "config watcher exited");
             }
         }))
@@ -226,10 +258,65 @@ fn load_config(path: &Path) -> Result<Config> {
     Ok(serde_json::from_str(trimmed)?)
 }
 
-fn watch_loop(path: &Path, state: Arc<ArcSwap<Config>>) -> Result<()> {
+fn load_config_with_strategy_override(
+    path: &Path,
+    strategies_path: Option<&Path>,
+) -> Result<Config> {
+    let mut config = load_config(path)?;
+    if let Some(strategies_path) = strategies_path {
+        if strategies_path.exists() {
+            let override_config = load_strategy_override(strategies_path)?;
+            config.strategy = override_config;
+        }
+    }
+    Ok(config)
+}
+
+fn load_strategy_override(path: &Path) -> Result<StrategyConfig> {
+    let raw = fs::read_to_string(path)?;
+    let stripped = strip_jsdoc_header(&raw)?;
+    let trimmed = stripped.trim();
+    let parsed: StrategyOverrideFile = serde_json::from_str(trimmed)?;
+    let strategy = match parsed {
+        StrategyOverrideFile::Wrapped(wrapper) => wrapper.strategy,
+        StrategyOverrideFile::Direct(strategy) => strategy,
+    };
+    validate_strategy_config(&strategy)?;
+    Ok(strategy)
+}
+
+fn validate_strategy_config(strategy: &StrategyConfig) -> Result<()> {
+    if !(0.0..=1.0).contains(&strategy.kelly_fraction) {
+        return Err(BankaiError::InvalidArgument(
+            "kelly_fraction must be within [0, 1]".to_string(),
+        ));
+    }
+    if strategy.snipe_min_edge_bps < 0.0 {
+        return Err(BankaiError::InvalidArgument(
+            "snipe_min_edge_bps must be non-negative".to_string(),
+        ));
+    }
+    if strategy.spread_offset_bps < 0.0 {
+        return Err(BankaiError::InvalidArgument(
+            "spread_offset_bps must be non-negative".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn watch_loop(
+    path: &Path,
+    strategies_path: Option<&Path>,
+    state: Arc<ArcSwap<Config>>,
+) -> Result<()> {
     let (tx, rx) = mpsc::channel();
     let mut watcher = notify::recommended_watcher(tx)?;
     watcher.watch(path, RecursiveMode::NonRecursive)?;
+    if let Some(strategies_path) = strategies_path {
+        if strategies_path.exists() {
+            watcher.watch(strategies_path, RecursiveMode::NonRecursive)?;
+        }
+    }
 
     loop {
         let event = rx.recv()?;
@@ -238,7 +325,7 @@ fn watch_loop(path: &Path, state: Arc<ArcSwap<Config>>) -> Result<()> {
                 if !is_relevant_event(&event.kind) {
                     continue;
                 }
-                match load_config(path) {
+                match load_config_with_strategy_override(path, strategies_path) {
                     Ok(config) => {
                         state.store(Arc::new(config));
                         tracing::info!("config reloaded");
