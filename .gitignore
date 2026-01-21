@@ -9,6 +9,9 @@
 #  * - Keep this list minimal and focused on generated files.
 #  */
 /target/
+/target_local/
+/tmp/bankai_target/
+/tmp/bankai_tmp/
 **/__pycache__/
 *.pyc
 config/secrets.enc

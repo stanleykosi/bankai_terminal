@@ -209,3 +209,71 @@ pub fn evaluate_staleness(
         is_stale: ratio > max_ratio,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_config() -> KillSwitchConfig {
+        KillSwitchConfig {
+            latency_ms: 100,
+            clock_drift_ms: 50,
+            consecutive_losses: 2,
+        }
+    }
+
+    #[test]
+    fn it_triggers_halt_on_latency_and_records_reason() {
+        let state = RiskState::new(test_config());
+
+        assert!(!state.is_halted());
+        assert!(!state.record_latency_ms(80));
+        assert!(!state.is_halted());
+
+        assert!(state.record_latency_ms(150));
+        assert!(state.is_halted());
+        assert_eq!(state.halt_reason(), HaltReason::Latency);
+    }
+
+    #[test]
+    fn it_triggers_halt_on_clock_drift_and_resets() {
+        let state = RiskState::new(test_config());
+
+        assert!(state.record_clock_drift_ms(75));
+        assert!(state.is_halted());
+        assert_eq!(state.halt_reason(), HaltReason::ClockDrift);
+
+        state.clear_halt();
+        assert!(!state.is_halted());
+        assert_eq!(state.halt_reason(), HaltReason::None);
+    }
+
+    #[test]
+    fn it_triggers_halt_on_consecutive_losses() {
+        let state = RiskState::new(test_config());
+
+        assert!(!state.record_loss());
+        assert!(!state.record_loss());
+        assert!(state.record_loss());
+        assert!(state.is_halted());
+        assert_eq!(state.halt_reason(), HaltReason::ConsecutiveLosses);
+    }
+
+    #[test]
+    fn it_calculates_staleness_ratio_and_flags_stale() {
+        let result = evaluate_staleness(1_000, 800, 1_400, 0.4).expect("staleness computed");
+        assert!(result.ratio > 0.0);
+        assert!(result.is_stale);
+    }
+
+    #[test]
+    fn it_errors_when_candle_end_not_in_future() {
+        let err = evaluate_staleness(1_500, 1_000, 1_500, 0.1).unwrap_err();
+        match err {
+            BankaiError::InvalidArgument(msg) => {
+                assert!(msg.contains("candle_end_timestamp_ms must be in the future"))
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+}

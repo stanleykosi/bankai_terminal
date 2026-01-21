@@ -120,3 +120,99 @@ fn validate_probability(value: f64, field: &str) -> Result<f64> {
     }
     Ok(value)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::types::TradeMode;
+
+    fn base_strategy() -> StrategyConfig {
+        StrategyConfig {
+            kelly_fraction: 0.25,
+            snipe_min_edge_bps: 500.0,
+            spread_offset_bps: 15.0,
+        }
+    }
+
+    fn base_fees() -> FeeConfig {
+        FeeConfig {
+            taker_fee_bps: 40.0,
+            estimated_gas_bps: 25.0,
+        }
+    }
+
+    fn sample_input(implied_prob: f64, true_prob: f64) -> AnalysisInput {
+        AnalysisInput {
+            market_id: "m1".to_string(),
+            asset_id: "a1".to_string(),
+            implied_prob,
+            true_prob,
+            timestamp_ms: 1_717_171_717,
+        }
+    }
+
+    #[test]
+    fn it_rejects_invalid_probabilities() {
+        let err = analyze_opportunity(
+            sample_input(1.2, 0.5),
+            &base_strategy(),
+            &base_fees(),
+        )
+        .unwrap_err();
+        match err {
+            BankaiError::InvalidArgument(msg) => assert!(msg.contains("implied_prob")),
+            _ => panic!("unexpected error variant"),
+        }
+    }
+
+    #[test]
+    fn it_returns_no_edge_when_true_prob_lower() {
+        let result = analyze_opportunity(sample_input(0.6, 0.4), &base_strategy(), &base_fees())
+            .expect("analysis result");
+        assert_eq!(result.decision, TradeDecision::NoEdge);
+        assert!(result.intent.is_none());
+        assert!(result.edge < 0.0);
+    }
+
+    #[test]
+    fn it_returns_ladder_when_edge_below_snipe_floor() {
+        let result = analyze_opportunity(
+            sample_input(0.45, 0.495),
+            &base_strategy(),
+            &base_fees(),
+        )
+        .unwrap();
+        assert_eq!(result.decision, TradeDecision::Ladder);
+
+        let intent = result.intent.expect("ladder intent");
+        assert_eq!(intent.mode, TradeMode::Ladder);
+        assert!(result.edge_bps < snipe_threshold_bps(&base_strategy(), &base_fees()));
+    }
+
+    #[test]
+    fn it_returns_snipe_when_edge_exceeds_guard() {
+        let result =
+            analyze_opportunity(sample_input(0.2, 0.55), &base_strategy(), &base_fees()).unwrap();
+        assert_eq!(result.decision, TradeDecision::Snipe);
+
+        let intent = result.intent.expect("snipe intent");
+        assert_eq!(intent.mode, TradeMode::Snipe);
+        assert!(result.edge_bps >= snipe_threshold_bps(&base_strategy(), &base_fees()));
+    }
+
+    #[test]
+    fn it_uses_maximum_threshold_between_strategy_and_fees() {
+        let strategy = StrategyConfig {
+            kelly_fraction: 0.25,
+            snipe_min_edge_bps: 150.0,
+            spread_offset_bps: 10.0,
+        };
+        let fees = FeeConfig {
+            taker_fee_bps: 80.0,
+            estimated_gas_bps: 50.0,
+        };
+
+        let threshold = snipe_threshold_bps(&strategy, &fees);
+        assert_eq!(threshold, 330.0);
+    }
+}

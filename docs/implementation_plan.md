@@ -179,7 +179,7 @@
   - **Step Dependencies**: Step 13
 
 ## Phase 9: Testing and Validation
-- [ ] Step 24: Unit Testing (Rust & Python)
+- [X] Step 24: Unit Testing (Rust & Python)
   - **Task**: Write unit tests for critical paths: Staleness calculations, Volatility halt triggers, Kelly sizing math (Python side), and EV calculations (Rust side).
   - **Files**:
     - `src/engine/risk.rs`: Tests module.

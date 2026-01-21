@@ -34,6 +34,11 @@ def test_calculate_kelly_invalid_inputs() -> None:
     assert calculate_kelly(0.5, 1.0) == 0.0
 
 
+def test_calculate_kelly_fractional_position() -> None:
+    kelly = calculate_kelly(0.55, 1.9)
+    assert kelly == pytest.approx(0.05)
+
+
 def test_validate_signal_threshold() -> None:
     payload = {"combined_value": 101.0}
     assert validate_signal(json.dumps(payload), 100.0) is True

@@ -11,7 +11,7 @@
 {
   "endpoints": {
     "binance_ws": "wss://stream.binance.com:9443/ws",
-    "polymarket_ws": "wss://ws-subscriptions-clob.polymarket.com",
+    "polymarket_ws": "wss://ws-subscriptions-clob.polymarket.com/ws/market",
     "polymarket_gamma": "https://gamma-api.polymarket.com",
     "allora_rpc": "https://allora-rpc.testnet.allora.network",
     "relayer_http": "https://clob.polymarket.com",
@@ -41,7 +41,7 @@
   },
   "allora_consumer": {
     "base_url": "https://api.allora.network/v2/allora/consumer",
-    "chain": "mainnet",
+    "chain": "ethereum-11155111",
     "poll_interval_secs": 2,
     "timeout_ms": 2000,
     "topics": [
