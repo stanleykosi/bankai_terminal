@@ -171,7 +171,7 @@
     - `config/strategies.json`: Dynamic strategy config.
   - **Step Dependencies**: Step 6, Step 2
 
-- [ ] Step 23: TUI Implementation (Ratatui)
+- [X] Step 23: TUI Implementation (Ratatui)
   - **Task**: Implement the Terminal User Interface. Display "System Health" (Clock, Latency), "Active Markets" (with EV, Fee, Mode), and "Financials" (Bankroll, PnL). Ensure TUI rendering does not block the trading engine.
   - **Files**:
     - `src/ui/mod.rs`: TUI app loop.

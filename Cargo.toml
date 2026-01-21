@@ -47,3 +47,5 @@ ethers-signers = "2.0"
 ethers-providers = "2.0"
 hmac = "0.12"
 sha2 = "0.10"
+ratatui = { version = "0.26", default-features = false, features = ["crossterm"] }
+crossterm = "0.27"

@@ -17,3 +17,4 @@ pub mod oracle;
 pub mod security;
 pub mod storage;
 pub mod telemetry;
+pub mod ui;

@@ -1,3 +1,13 @@
+/**
+ * @purpose
+ * Runtime configuration for Bankai Terminal.
+ *
+ * @dependencies
+ * - None
+ *
+ * @notes
+ * - JSDoc header is stripped before JSON parsing.
+ */
 {
   "endpoints": {
     "binance_ws": "wss://stream.binance.com:9443/ws",
@@ -31,7 +41,7 @@
   },
   "allora_consumer": {
     "base_url": "https://api.allora.network/v2/allora/consumer",
-    "chain": "price/ethereum-11155111",
+    "chain": "mainnet",
     "poll_interval_secs": 2,
     "timeout_ms": 2000,
     "topics": [
@@ -52,6 +62,6 @@
   "preflight": {
     "enabled": true,
     "fail_fast": true,
-    "timeout_ms": 3000
+    "timeout_ms": 30000
   }
 }

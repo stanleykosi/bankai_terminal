@@ -32,6 +32,7 @@ pub struct AlloraOracleConfig {
 pub struct AlloraConsumerTopic {
     pub asset: String,
     pub timeframe: String,
+    pub topic_id: Option<u64>,
 }
 
 pub struct AlloraOracle {
@@ -146,13 +147,29 @@ impl AlloraOracle {
 }
 
 fn build_consumer_url(base_url: &str, chain: &str, topic: &AlloraConsumerTopic) -> Result<String> {
+    let base = base_url.trim_end_matches('/');
+    let chain_path = chain.trim_matches('/');
+    if base.is_empty() || chain_path.is_empty() {
+        return Err(BankaiError::InvalidArgument(
+            "allora base_url/chain cannot be empty".to_string(),
+        ));
+    }
+
+    if let Some(topic_id) = topic.topic_id {
+        return Ok(format!("{}/{}?allora_topic_id={}", base, chain_path, topic_id));
+    }
+
     if topic.asset.trim().is_empty() || topic.timeframe.trim().is_empty() {
         return Err(BankaiError::InvalidArgument(
             "allora topic asset/timeframe cannot be empty".to_string(),
         ));
     }
-    let base = base_url.trim_end_matches('/');
-    let chain_path = chain.trim_matches('/');
+
+    let chain_path = if chain_path.contains('/') {
+        chain_path.to_string()
+    } else {
+        format!("price/{chain_path}")
+    };
     Ok(format!(
         "{}/{}/{}/{}",
         base, chain_path, topic.asset, topic.timeframe

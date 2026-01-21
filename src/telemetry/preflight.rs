@@ -90,6 +90,7 @@ impl PreflightReport {
 pub async fn run(config: &Config) -> Result<PreflightReport> {
     let timeout = resolve_timeout(config.preflight.timeout_ms);
     let client = Client::builder().timeout(timeout).build()?;
+    let allora_client = build_allora_client(config, timeout)?;
     let mut checks: Vec<BoxFuture<'static, PreflightCheck>> = Vec::new();
 
     checks.push(check_env_address(
@@ -147,7 +148,7 @@ pub async fn run(config: &Config) -> Result<PreflightReport> {
         timeout,
     ));
 
-    if let Some(check) = build_allora_check(config, client.clone())? {
+    if let Some(check) = build_allora_check(config, allora_client)? {
         checks.push(check);
     }
 
@@ -222,7 +223,7 @@ fn build_allora_check(
     let asset = topic.asset.trim();
     let timeframe = topic.timeframe.trim();
 
-    if base.is_empty() || chain.is_empty() || asset.is_empty() || timeframe.is_empty() {
+    if base.is_empty() || chain.is_empty() {
         return Ok(Some(check_failed(
             "allora consumer",
             "invalid consumer config",
@@ -231,7 +232,24 @@ fn build_allora_check(
         )));
     }
 
-    let url = format!("{}/{}/{}/{}", base, chain, asset, timeframe);
+    let url = if let Some(topic_id) = topic.topic_id {
+        format!("{}/{}?allora_topic_id={topic_id}", base, chain)
+    } else {
+        if asset.is_empty() || timeframe.is_empty() {
+            return Ok(Some(check_failed(
+                "allora consumer",
+                "invalid consumer config",
+                true,
+                None,
+            )));
+        }
+        let chain_path = if chain.contains('/') {
+            chain.to_string()
+        } else {
+            format!("price/{chain}")
+        };
+        format!("{}/{}/{}/{}", base, chain_path, asset, timeframe)
+    };
     Ok(Some(check_http_endpoint(
         "allora consumer",
         url,
@@ -239,6 +257,31 @@ fn build_allora_check(
         true,
         false,
     )))
+}
+
+fn build_allora_client(config: &Config, timeout: Duration) -> Result<Client> {
+    let mut builder = Client::builder().timeout(timeout);
+    if let Some(allora) = config.allora_consumer.as_ref() {
+        let api_key = allora
+            .api_key
+            .clone()
+            .or_else(|| std::env::var("ALLORA_API_KEY").ok());
+        if let Some(api_key) = api_key {
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(
+                "x-api-key",
+                reqwest::header::HeaderValue::from_str(&api_key).map_err(|_| {
+                    BankaiError::InvalidArgument("invalid allora api key".to_string())
+                })?,
+            );
+            headers.insert(
+                reqwest::header::ACCEPT,
+                reqwest::header::HeaderValue::from_static("application/json"),
+            );
+            builder = builder.default_headers(headers);
+        }
+    }
+    Ok(builder.build()?)
 }
 
 fn check_env_address(

@@ -28,6 +28,7 @@ use bankai_terminal::storage::orderbook::OrderBookStore;
 use bankai_terminal::storage::redis::RedisManager;
 use bankai_terminal::telemetry::health::HealthMonitor;
 use bankai_terminal::telemetry::{logging, metrics, preflight};
+use bankai_terminal::ui;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
@@ -89,6 +90,10 @@ async fn main() -> Result<()> {
     let _health = HealthMonitor::from_config(risk.clone(), &config.health)?.spawn();
 
     let (market_tx, _) = broadcast::channel(1024);
+    let tui_handle = spawn_tui_if_enabled(config_state.clone(), risk.clone(), market_tx.clone())
+        .await
+        .ok()
+        .flatten();
     let engine = EngineCore::new(config_state, risk.clone());
     let _engine_handle = engine.spawn(market_tx.subscribe());
 
@@ -99,6 +104,9 @@ async fn main() -> Result<()> {
     tracing::info!("engine running");
     tokio::signal::ctrl_c().await?;
     tracing::info!("shutdown signal received");
+    if let Some(handle) = tui_handle {
+        handle.shutdown();
+    }
     Ok(())
 }
 
@@ -128,6 +136,7 @@ fn spawn_allora_oracle(
         .map(|topic| AlloraConsumerTopic {
             asset: topic.asset.clone(),
             timeframe: topic.timeframe.clone(),
+            topic_id: topic.topic_id,
         })
         .collect();
     let oracle_config = AlloraOracleConfig {
@@ -136,7 +145,10 @@ fn spawn_allora_oracle(
         topics,
         poll_interval: Duration::from_secs(allora.poll_interval_secs),
         timeout: Duration::from_millis(allora.timeout_ms),
-        api_key: None,
+        api_key: allora
+            .api_key
+            .clone()
+            .or_else(|| std::env::var("ALLORA_API_KEY").ok()),
     };
     let oracle = AlloraOracle::new(oracle_config)?;
     let _handle = oracle.spawn(sender);
@@ -207,4 +219,33 @@ fn asset_to_binance_symbol(asset: &str) -> Option<String> {
         return Some(trimmed);
     }
     Some(format!("{trimmed}usdt"))
+}
+
+async fn spawn_tui_if_enabled(
+    config: Arc<arc_swap::ArcSwap<Config>>,
+    risk: Arc<RiskState>,
+    sender: broadcast::Sender<MarketUpdate>,
+) -> Result<Option<ui::TuiHandle>> {
+    if !ui::is_tui_enabled() {
+        return Ok(None);
+    }
+
+    let redis = match std::env::var("REDIS_URL") {
+        Ok(url) => match RedisManager::new(&url).await {
+            Ok(manager) => Some(manager),
+            Err(error) => {
+                tracing::warn!(?error, "redis unavailable; ui bankroll disabled");
+                None
+            }
+        },
+        Err(_) => None,
+    };
+
+    match ui::spawn_tui(config, risk, sender.subscribe(), redis) {
+        Ok(handle) => Ok(Some(handle)),
+        Err(error) => {
+            tracing::warn!(?error, "failed to start tui");
+            Ok(None)
+        }
+    }
 }

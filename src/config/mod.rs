@@ -117,6 +117,8 @@ pub struct AlloraConsumerConfig {
     pub chain: String,
     pub poll_interval_secs: u64,
     pub timeout_ms: u64,
+    #[serde(default)]
+    pub api_key: Option<String>,
     pub topics: Vec<AlloraTopicConfig>,
 }
 
@@ -124,6 +126,8 @@ pub struct AlloraConsumerConfig {
 pub struct AlloraTopicConfig {
     pub asset: String,
     pub timeframe: String,
+    #[serde(default)]
+    pub topic_id: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
