@@ -11,8 +11,10 @@
  */
 use arc_swap::ArcSwap;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::execute;
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use std::collections::HashMap;
@@ -35,6 +37,8 @@ const BANKROLL_KEY: &str = "sys:bankroll:usdc";
 const DEFAULT_MARKET_LIMIT: usize = 12;
 const DEFAULT_REFRESH_MS: u64 = 250;
 const DEFAULT_BANKROLL_REFRESH_MS: u64 = 2_000;
+const DEFAULT_POLYMARKET_REFRESH_MS: u64 = 5_000;
+const POLYMARKET_STALE_MS: u64 = 120_000;
 const ORACLE_ONLINE_MULTIPLIER: u64 = 3;
 
 type UiResult<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -44,6 +48,7 @@ pub struct TuiConfig {
     pub refresh_interval: Duration,
     pub bankroll_interval: Duration,
     pub market_limit: usize,
+    pub polymarket_interval: Duration,
 }
 
 impl Default for TuiConfig {
@@ -52,6 +57,7 @@ impl Default for TuiConfig {
             refresh_interval: Duration::from_millis(DEFAULT_REFRESH_MS),
             bankroll_interval: Duration::from_millis(DEFAULT_BANKROLL_REFRESH_MS),
             market_limit: DEFAULT_MARKET_LIMIT,
+            polymarket_interval: Duration::from_millis(DEFAULT_POLYMARKET_REFRESH_MS),
         }
     }
 }
@@ -63,6 +69,7 @@ pub struct StatusBarData {
     pub halt_reason: HaltReason,
     pub binance_online: bool,
     pub allora_online: bool,
+    pub polymarket_online: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -78,6 +85,13 @@ pub struct HealthPanelData {
 pub struct FinancialPanelData {
     pub bankroll_usdc: Option<f64>,
     pub pnl_24h: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PolymarketPanelData {
+    pub online: bool,
+    pub asset_count: Option<usize>,
+    pub last_refresh: Option<Duration>,
 }
 
 #[derive(Debug, Clone)]
@@ -103,8 +117,10 @@ impl MarketMode {
 pub struct MarketRow {
     pub asset: String,
     pub price: Option<f64>,
-    pub inference: Option<f64>,
-    pub edge_bps: Option<f64>,
+    pub inference_5m: Option<f64>,
+    pub inference_8h: Option<f64>,
+    pub edge_bps_5m: Option<f64>,
+    pub edge_bps_8h: Option<f64>,
     pub fee_bps: Option<f64>,
     pub mode: MarketMode,
     pub last_update_ms: Option<u64>,
@@ -115,6 +131,7 @@ pub struct UiSnapshot {
     pub status: StatusBarData,
     pub health: HealthPanelData,
     pub financials: FinancialPanelData,
+    pub polymarket: PolymarketPanelData,
     pub markets: Vec<MarketRow>,
 }
 
@@ -139,7 +156,8 @@ enum UiCommand {
 struct MarketSnapshot {
     asset: String,
     price: Option<f64>,
-    inference: Option<f64>,
+    inference_5m: Option<f64>,
+    inference_8h: Option<f64>,
     last_binance_ms: Option<u64>,
     last_allora_ms: Option<u64>,
 }
@@ -149,7 +167,8 @@ impl MarketSnapshot {
         Self {
             asset,
             price: None,
-            inference: None,
+            inference_5m: None,
+            inference_8h: None,
             last_binance_ms: None,
             last_allora_ms: None,
         }
@@ -166,7 +185,11 @@ impl MarketSnapshot {
     }
 
     fn apply_allora(&mut self, update: &AlloraMarketUpdate) {
-        self.inference = Some(update.inference_value);
+        match update.timeframe.to_ascii_lowercase().as_str() {
+            "5m" => self.inference_5m = Some(update.inference_value),
+            "8h" => self.inference_8h = Some(update.inference_value),
+            _ => self.inference_5m = Some(update.inference_value),
+        }
         let received_at = if update.received_at_ms > 0 {
             update.received_at_ms
         } else if update.signal_timestamp_ms > 0 {
@@ -226,9 +249,12 @@ async fn snapshot_loop(
     let mut market_state: HashMap<String, MarketSnapshot> = HashMap::new();
     let mut refresh = tokio::time::interval(ui_config.refresh_interval);
     let mut bankroll_interval = tokio::time::interval(ui_config.bankroll_interval);
+    let mut polymarket_interval = tokio::time::interval(ui_config.polymarket_interval);
     let start_time = Instant::now();
     let mut bankroll_usdc: Option<f64> = None;
     let pnl_24h: Option<f64> = None;
+    let mut polymarket_asset_count: Option<usize> = None;
+    let mut polymarket_last_refresh: Option<Instant> = None;
 
     loop {
         tokio::select! {
@@ -236,13 +262,17 @@ async fn snapshot_loop(
                 match message {
                     Ok(update) => match update {
                         MarketUpdate::Binance(update) => {
-                            let entry = market_state.entry(update.asset.clone())
-                                .or_insert_with(|| MarketSnapshot::new(update.asset.clone()));
+                            let key = canonical_asset(&update.asset);
+                            let entry = market_state
+                                .entry(key.clone())
+                                .or_insert_with(|| MarketSnapshot::new(key.clone()));
                             entry.apply_binance(&update);
                         }
                         MarketUpdate::Allora(update) => {
-                            let entry = market_state.entry(update.asset.clone())
-                                .or_insert_with(|| MarketSnapshot::new(update.asset.clone()));
+                            let key = canonical_asset(&update.asset);
+                            let entry = market_state
+                                .entry(key.clone())
+                                .or_insert_with(|| MarketSnapshot::new(key.clone()));
                             entry.apply_allora(&update);
                         }
                     },
@@ -258,6 +288,17 @@ async fn snapshot_loop(
                     }
                 }
             }
+            _ = polymarket_interval.tick() => {
+                if let Some(redis) = redis.as_ref() {
+                    match redis.get_polymarket_asset_ids().await {
+                        Ok(ids) => {
+                            polymarket_asset_count = Some(ids.len());
+                            polymarket_last_refresh = Some(Instant::now());
+                        }
+                        Err(error) => tracing::warn!(?error, "failed to read polymarket asset ids from redis"),
+                    }
+                }
+            }
             _ = refresh.tick() => {
                 let snapshot = build_snapshot(
                     &config,
@@ -266,6 +307,8 @@ async fn snapshot_loop(
                     start_time,
                     bankroll_usdc,
                     pnl_24h,
+                    polymarket_asset_count,
+                    polymarket_last_refresh,
                     ui_config.market_limit,
                 );
                 if sender.send(UiCommand::Snapshot(snapshot)).is_err() {
@@ -285,6 +328,8 @@ fn build_snapshot(
     start_time: Instant,
     bankroll_usdc: Option<f64>,
     pnl_24h: Option<f64>,
+    polymarket_asset_count: Option<usize>,
+    polymarket_last_refresh: Option<Instant>,
     market_limit: usize,
 ) -> UiSnapshot {
     let config = config.load_full();
@@ -305,6 +350,7 @@ fn build_snapshot(
             last_allora_update_ms(market_state),
             allora_online_window(&config),
         ),
+        polymarket_online: is_polymarket_online(polymarket_last_refresh),
     };
 
     let health = HealthPanelData {
@@ -320,14 +366,20 @@ fn build_snapshot(
         pnl_24h,
     };
 
+    let polymarket_panel = PolymarketPanelData {
+        online: status.polymarket_online,
+        asset_count: polymarket_asset_count,
+        last_refresh: polymarket_last_refresh.map(|ts| ts.elapsed()),
+    };
+
     let snipe_floor = snipe_threshold_bps(&config.strategy, &config.fees);
     let mut markets: Vec<MarketRow> = market_state
         .values()
         .map(|snapshot| build_market_row(snapshot, snipe_floor, config.fees.taker_fee_bps))
         .collect();
     markets.sort_by(|a, b| {
-        let left = a.edge_bps.unwrap_or(f64::NEG_INFINITY);
-        let right = b.edge_bps.unwrap_or(f64::NEG_INFINITY);
+        let left = a.edge_bps_5m.unwrap_or(f64::NEG_INFINITY);
+        let right = b.edge_bps_5m.unwrap_or(f64::NEG_INFINITY);
         right
             .partial_cmp(&left)
             .unwrap_or(std::cmp::Ordering::Equal)
@@ -340,6 +392,7 @@ fn build_snapshot(
         status,
         health,
         financials,
+        polymarket: polymarket_panel,
         markets,
     }
 }
@@ -349,12 +402,12 @@ fn build_market_row(
     snipe_floor_bps: f64,
     taker_fee_bps: f64,
 ) -> MarketRow {
-    let edge_bps = match (snapshot.price, snapshot.inference) {
-        (Some(price), Some(inference)) if price > 0.0 => Some((inference - price) / price * 10_000.0),
-        _ => None,
-    };
+    let edge_bps_5m = edge_for(snapshot.price, snapshot.inference_5m);
+    let edge_bps_8h = edge_for(snapshot.price, snapshot.inference_8h);
 
-    let mode = match edge_bps {
+    // Prefer short-horizon signal for mode; fall back to 8h when 5m missing.
+    let chosen_edge = edge_bps_5m.or(edge_bps_8h);
+    let mode = match chosen_edge {
         None => MarketMode::NoSignal,
         Some(value) if value > 0.0 && value >= snipe_floor_bps => MarketMode::Snipe,
         Some(value) if value > 0.0 => MarketMode::Ladder,
@@ -367,15 +420,15 @@ fn build_market_row(
         _ => None,
     };
 
-    let last_update_ms = snapshot
-        .last_binance_ms
-        .max(snapshot.last_allora_ms);
+    let last_update_ms = snapshot.last_binance_ms.max(snapshot.last_allora_ms);
 
     MarketRow {
         asset: snapshot.asset.clone(),
         price: snapshot.price,
-        inference: snapshot.inference,
-        edge_bps,
+        inference_5m: snapshot.inference_5m,
+        inference_8h: snapshot.inference_8h,
+        edge_bps_5m,
+        edge_bps_8h,
         fee_bps,
         mode,
         last_update_ms,
@@ -383,11 +436,17 @@ fn build_market_row(
 }
 
 fn last_binance_update_ms(state: &HashMap<String, MarketSnapshot>) -> Option<u64> {
-    state.values().filter_map(|snapshot| snapshot.last_binance_ms).max()
+    state
+        .values()
+        .filter_map(|snapshot| snapshot.last_binance_ms)
+        .max()
 }
 
 fn last_allora_update_ms(state: &HashMap<String, MarketSnapshot>) -> Option<u64> {
-    state.values().filter_map(|snapshot| snapshot.last_allora_ms).max()
+    state
+        .values()
+        .filter_map(|snapshot| snapshot.last_allora_ms)
+        .max()
 }
 
 fn is_oracle_online(now_ms: u64, last_update_ms: Option<u64>, window: Duration) -> bool {
@@ -424,6 +483,7 @@ fn ui_loop(receiver: mpsc::Receiver<UiCommand>, config: TuiConfig) -> UiResult<(
             halt_reason: HaltReason::None,
             binance_online: false,
             allora_online: false,
+            polymarket_online: false,
         },
         health: HealthPanelData {
             halted: false,
@@ -435,6 +495,11 @@ fn ui_loop(receiver: mpsc::Receiver<UiCommand>, config: TuiConfig) -> UiResult<(
         financials: FinancialPanelData {
             bankroll_usdc: None,
             pnl_24h: None,
+        },
+        polymarket: PolymarketPanelData {
+            online: false,
+            asset_count: None,
+            last_refresh: None,
         },
         markets: Vec::new(),
     };
@@ -461,7 +526,6 @@ fn ui_loop(receiver: mpsc::Receiver<UiCommand>, config: TuiConfig) -> UiResult<(
                 }
             }
         }
-
     }
 }
 
@@ -490,6 +554,14 @@ fn parse_env_bool(value: &str) -> Option<bool> {
     }
 }
 
+fn canonical_asset(raw: &str) -> String {
+    let upper = raw.trim().to_ascii_uppercase();
+    upper
+        .strip_suffix("USDT")
+        .map(|value| value.to_string())
+        .unwrap_or(upper.to_string())
+}
+
 fn resolve_price(update: &BinanceMarketUpdate) -> Option<f64> {
     if let Some(value) = update.last_price {
         if value > 0.0 {
@@ -507,4 +579,19 @@ fn resolve_price(update: &BinanceMarketUpdate) -> Option<f64> {
 fn now_ms() -> Option<u64> {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
     Some(now.as_millis() as u64)
+}
+
+fn edge_for(price: Option<f64>, inference: Option<f64>) -> Option<f64> {
+    match (price, inference) {
+        (Some(price), Some(inference)) if price > 0.0 => {
+            Some((inference - price) / price * 10_000.0)
+        }
+        _ => None,
+    }
+}
+
+fn is_polymarket_online(last_refresh: Option<Instant>) -> bool {
+    last_refresh
+        .map(|ts| ts.elapsed().as_millis() as u64 <= POLYMARKET_STALE_MS)
+        .unwrap_or(false)
 }

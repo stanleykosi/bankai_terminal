@@ -17,12 +17,11 @@
  * - Subgraph backfill is optional and runs on a slower interval.
  */
 use ethers_core::abi::{
-    Abi, Event, EventParam, Function, LogParam, Param, ParamType, RawLog,
-    StateMutability, Token,
+    Abi, Event, EventParam, Function, LogParam, Param, ParamType, RawLog, StateMutability, Token,
 };
 use ethers_core::types::{
-    transaction::eip2718::TypedTransaction, Address, BlockNumber, Bytes,
-    Eip1559TransactionRequest, Filter, H256, TransactionRequest, U256, U64,
+    transaction::eip2718::TypedTransaction, Address, BlockNumber, Bytes, Eip1559TransactionRequest,
+    Filter, TransactionRequest, H256, U256, U64,
 };
 use ethers_core::utils::keccak256;
 use ethers_providers::{Http, Middleware, Provider};
@@ -391,7 +390,12 @@ impl RedemptionClient {
         to_block: u64,
     ) -> Result<Vec<ConditionResolutionEvent>> {
         let logs = self
-            .fetch_event_logs(self.ctf_address, &self.resolution_event, from_block, to_block)
+            .fetch_event_logs(
+                self.ctf_address,
+                &self.resolution_event,
+                from_block,
+                to_block,
+            )
             .await?;
         let mut events = Vec::new();
         for log in logs {
@@ -416,7 +420,12 @@ impl RedemptionClient {
     ) -> Result<Vec<ResolvedCondition>> {
         let mut events = Vec::new();
         let with_payouts = self
-            .fetch_event_logs(adapter, &self.adapter_resolution_event, from_block, to_block)
+            .fetch_event_logs(
+                adapter,
+                &self.adapter_resolution_event,
+                from_block,
+                to_block,
+            )
             .await?;
         for log in with_payouts {
             let parsed = parse_log(&self.adapter_resolution_event, &log)?;
@@ -440,16 +449,18 @@ impl RedemptionClient {
         }
 
         let legacy = self
-            .fetch_event_logs(adapter, &self.adapter_resolution_legacy_event, from_block, to_block)
+            .fetch_event_logs(
+                adapter,
+                &self.adapter_resolution_legacy_event,
+                from_block,
+                to_block,
+            )
             .await?;
         for log in legacy {
             let parsed = parse_log(&self.adapter_resolution_legacy_event, &log)?;
             let question_id = extract_question_id(&parsed.params)?;
-            let condition_id = compute_condition_id(
-                adapter,
-                question_id,
-                default_outcome_slot_count.max(1),
-            );
+            let condition_id =
+                compute_condition_id(adapter, question_id, default_outcome_slot_count.max(1));
             events.push(ResolvedCondition {
                 condition_id,
                 source: ResolutionSource::Adapter {
@@ -510,9 +521,8 @@ impl RedemptionClient {
             .confirmations(confirmations)
             .await
             .map_err(|err| BankaiError::Rpc(format!("redeemPositions receipt error: {err}")))?;
-        let receipt = receipt.ok_or_else(|| {
-            BankaiError::Rpc("redeemPositions transaction dropped".to_string())
-        })?;
+        let receipt = receipt
+            .ok_or_else(|| BankaiError::Rpc("redeemPositions transaction dropped".to_string()))?;
 
         if receipt.status != Some(U64::from(1)) {
             return Err(BankaiError::Rpc("redeemPositions reverted".to_string()));
@@ -530,7 +540,9 @@ impl RedemptionClient {
         let data = self
             .balance_of
             .encode_input(&[Token::Address(self.wallet.address())])
-            .map_err(|err| BankaiError::InvalidArgument(format!("balanceOf encode failed: {err}")))?;
+            .map_err(|err| {
+                BankaiError::InvalidArgument(format!("balanceOf encode failed: {err}"))
+            })?;
         let tx = TransactionRequest {
             to: Some(self.collateral_token.into()),
             data: Some(Bytes::from(data)),
@@ -542,10 +554,9 @@ impl RedemptionClient {
             .call(&call, None)
             .await
             .map_err(|err| BankaiError::Rpc(format!("balanceOf call failed: {err}")))?;
-        let decoded = self
-            .balance_of
-            .decode_output(raw.as_ref())
-            .map_err(|err| BankaiError::InvalidArgument(format!("balanceOf decode failed: {err}")))?;
+        let decoded = self.balance_of.decode_output(raw.as_ref()).map_err(|err| {
+            BankaiError::InvalidArgument(format!("balanceOf decode failed: {err}"))
+        })?;
         decode_balance(&decoded)
     }
 
@@ -563,12 +574,7 @@ impl RedemptionClient {
                 "limit": limit as i64
             }
         });
-        let response = self
-            .http_client
-            .post(url)
-            .json(&payload)
-            .send()
-            .await?;
+        let response = self.http_client.post(url).json(&payload).send().await?;
         if !response.status().is_success() {
             return Err(BankaiError::Rpc(format!(
                 "subgraph request failed with status {}",
@@ -591,14 +597,11 @@ impl RedemptionClient {
     }
 
     fn encode_redeem_positions(&self, request: &RedemptionRequest) -> Result<Bytes> {
-        let function = self
-            .ctf_abi
-            .function("redeemPositions")
-            .map_err(|err| {
-                BankaiError::InvalidArgument(format!(
-                    "redeemPositions function missing from ABI: {err}"
-                ))
-            })?;
+        let function = self.ctf_abi.function("redeemPositions").map_err(|err| {
+            BankaiError::InvalidArgument(format!(
+                "redeemPositions function missing from ABI: {err}"
+            ))
+        })?;
         let tokens = vec![
             Token::Address(self.collateral_token),
             Token::FixedBytes(request.parent_collection_id.as_bytes().to_vec()),
@@ -748,7 +751,11 @@ impl<R: PositionResolver + 'static> RedemptionListener<R> {
                         start
                     }
                 };
-                (state.address, state.config.default_outcome_slot_count, from_block)
+                (
+                    state.address,
+                    state.config.default_outcome_slot_count,
+                    from_block,
+                )
             };
 
             if from_block > safe_block {
@@ -829,8 +836,7 @@ impl<R: PositionResolver + 'static> RedemptionListener<R> {
                     .default_outcome_slot_count
                     .max(1)
                     .max(*default_outcome_slot_count);
-                let condition_id =
-                    compute_condition_id(*address, question_id, outcome_slot_count);
+                let condition_id = compute_condition_id(*address, question_id, outcome_slot_count);
                 let resolved = ResolvedCondition {
                     condition_id,
                     source: ResolutionSource::Subgraph {
@@ -861,7 +867,10 @@ impl<R: PositionResolver + 'static> RedemptionListener<R> {
                     "condition resolved"
                 );
             }
-            ResolutionSource::Adapter { address, question_id } => {
+            ResolutionSource::Adapter {
+                address,
+                question_id,
+            } => {
                 tracing::info!(
                     condition_id = %format!("{:?}", resolved.condition_id),
                     source = resolved.source.label(),
@@ -870,7 +879,10 @@ impl<R: PositionResolver + 'static> RedemptionListener<R> {
                     "condition resolved"
                 );
             }
-            ResolutionSource::Subgraph { adapter, question_id } => {
+            ResolutionSource::Subgraph {
+                adapter,
+                question_id,
+            } => {
                 tracing::info!(
                     condition_id = %format!("{:?}", resolved.condition_id),
                     source = resolved.source.label(),
@@ -944,9 +956,10 @@ struct SubgraphError {
 }
 
 fn build_wallet(secrets: &Secrets, chain_id: u64) -> Result<LocalWallet> {
-    let key = secrets.polygon_private_key.as_ref().ok_or_else(|| {
-        BankaiError::InvalidArgument("polygon private key missing".to_string())
-    })?;
+    let key = secrets
+        .polygon_private_key
+        .as_ref()
+        .ok_or_else(|| BankaiError::InvalidArgument("polygon private key missing".to_string()))?;
     let trimmed = key.expose_secret().trim();
     if trimmed.is_empty() {
         return Err(BankaiError::InvalidArgument(
@@ -963,9 +976,8 @@ fn build_http_client(config: &RedemptionConfig) -> Result<Client> {
 }
 
 fn build_provider(config: &RedemptionConfig, client: Client) -> Result<Provider<Http>> {
-    let url = reqwest::Url::parse(config.rpc_url.trim()).map_err(|_| {
-        BankaiError::InvalidArgument("polygon rpc url is invalid".to_string())
-    })?;
+    let url = reqwest::Url::parse(config.rpc_url.trim())
+        .map_err(|_| BankaiError::InvalidArgument("polygon rpc url is invalid".to_string()))?;
     let http = Http::new_with_client(url, client);
     Ok(Provider::new(http))
 }
@@ -1015,18 +1027,16 @@ fn strip_jsdoc_header(contents: &str) -> Result<&str> {
 }
 
 fn parse_address(value: &str, field: &str) -> Result<Address> {
-    Address::from_str(value.trim()).map_err(|_| {
-        BankaiError::InvalidArgument(format!("{field} is not a valid address"))
-    })
+    Address::from_str(value.trim())
+        .map_err(|_| BankaiError::InvalidArgument(format!("{field} is not a valid address")))
 }
 
 fn parse_parent_collection_id(value: &str) -> Result<H256> {
     if value.trim().is_empty() {
         return Ok(H256::zero());
     }
-    H256::from_str(value.trim()).map_err(|_| {
-        BankaiError::InvalidArgument("parent collection id is invalid".to_string())
-    })
+    H256::from_str(value.trim())
+        .map_err(|_| BankaiError::InvalidArgument("parent collection id is invalid".to_string()))
 }
 
 #[allow(deprecated)]
@@ -1155,9 +1165,9 @@ fn parse_log(event: &Event, log: &ethers_core::types::Log) -> Result<ethers_core
         topics: log.topics.clone(),
         data: log.data.to_vec(),
     };
-    event.parse_log(raw).map_err(|err| {
-        BankaiError::InvalidArgument(format!("failed to parse log: {err}"))
-    })
+    event
+        .parse_log(raw)
+        .map_err(|err| BankaiError::InvalidArgument(format!("failed to parse log: {err}")))
 }
 
 fn compute_condition_id(oracle: Address, question_id: H256, outcome_slot_count: u32) -> H256 {
@@ -1177,15 +1187,14 @@ fn parse_question_id(value: &str) -> Result<H256> {
             "subgraph question id is empty".to_string(),
         ));
     }
-    H256::from_str(trimmed).map_err(|_| {
-        BankaiError::InvalidArgument("subgraph question id is invalid".to_string())
-    })
+    H256::from_str(trimmed)
+        .map_err(|_| BankaiError::InvalidArgument("subgraph question id is invalid".to_string()))
 }
 
 fn parse_timestamp(value: &str) -> Result<u64> {
-    value.parse::<u64>().map_err(|_| {
-        BankaiError::InvalidArgument("subgraph timestamp is invalid".to_string())
-    })
+    value
+        .parse::<u64>()
+        .map_err(|_| BankaiError::InvalidArgument("subgraph timestamp is invalid".to_string()))
 }
 
 fn build_adapter_states(configs: &[AdapterConfig]) -> Vec<AdapterState> {
@@ -1250,8 +1259,7 @@ async fn resolve_fee_data(
     }
 
     let max_fee = max_fee.unwrap_or_else(|| gwei_to_wei(DEFAULT_MAX_FEE_GWEI));
-    let mut max_priority =
-        max_priority.unwrap_or_else(|| gwei_to_wei(DEFAULT_PRIORITY_FEE_GWEI));
+    let mut max_priority = max_priority.unwrap_or_else(|| gwei_to_wei(DEFAULT_PRIORITY_FEE_GWEI));
     if max_priority > max_fee {
         max_priority = max_fee;
     }
@@ -1278,7 +1286,7 @@ fn scale_u256(value: U256, decimals: u32) -> Result<f64> {
         let split = raw.len() - decimals;
         format!("{}.{}", &raw[..split], &raw[split..])
     };
-    scaled.parse::<f64>().map_err(|_| {
-        BankaiError::InvalidArgument("failed to parse scaled balance".to_string())
-    })
+    scaled
+        .parse::<f64>()
+        .map_err(|_| BankaiError::InvalidArgument("failed to parse scaled balance".to_string()))
 }

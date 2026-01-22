@@ -186,7 +186,7 @@
     - `src/engine/analysis.rs`: Tests module.
   - **Step Dependencies**: Step 8, Step 14
 
-- [ ] Step 25: Simulation & Integration Tests
+- [X] Step 25: Simulation & Integration Tests
   - **Task**: Create `tests/simulation_test.rs`. Mock the Oracle inputs (feed a predefined CSV of prices/signals). Verify that `TradeIntent` is generated correctly and routed to the correct Rail. Verify Staleness Guard rejects old signals.
   - **Files**:
     - `tests/simulation_test.rs`: Integration test.

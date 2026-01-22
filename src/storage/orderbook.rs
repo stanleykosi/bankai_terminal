@@ -102,9 +102,9 @@ fn parse_price_score(price: &str) -> Result<f64> {
             "order book price missing".to_string(),
         ));
     }
-    trimmed.parse::<f64>().map_err(|_| {
-        BankaiError::InvalidArgument("order book price not numeric".to_string())
-    })
+    trimmed
+        .parse::<f64>()
+        .map_err(|_| BankaiError::InvalidArgument("order book price not numeric".to_string()))
 }
 
 fn bids_key(token_id: &str) -> String {

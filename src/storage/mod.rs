@@ -9,5 +9,5 @@
  * - Keep storage APIs async and non-blocking.
  */
 pub mod database;
-pub mod redis;
 pub mod orderbook;
+pub mod redis;

@@ -142,9 +142,7 @@ impl NonceManager {
     pub async fn set_next_nonce(&self, next_nonce: u64) -> Result<()> {
         let lock = self.lock();
         if !lock.acquire().await? {
-            return Err(BankaiError::InvalidArgument(
-                "nonce lock busy".to_string(),
-            ));
+            return Err(BankaiError::InvalidArgument("nonce lock busy".to_string()));
         }
         let result = self.set_next_nonce_unlocked(next_nonce).await;
         lock.release().await?;

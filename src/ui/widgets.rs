@@ -14,31 +14,39 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table};
 use ratatui::Frame;
 
-use super::{FinancialPanelData, HealthPanelData, MarketMode, MarketRow, StatusBarData, UiSnapshot};
+use super::{
+    FinancialPanelData, HealthPanelData, MarketMode, MarketRow, PolymarketPanelData, StatusBarData,
+    UiSnapshot,
+};
 use crate::engine::risk::HaltReason;
 
 pub fn render_dashboard(frame: &mut Frame, snapshot: &UiSnapshot) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .constraints([Constraint::Length(2), Constraint::Min(0)])
         .split(frame.size());
 
     render_status_bar(frame, layout[0], &snapshot.status);
 
     let body = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
+        .constraints([Constraint::Percentage(68), Constraint::Percentage(32)])
         .split(layout[1]);
 
     render_markets(frame, body[0], &snapshot.markets);
 
     let right = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+        .constraints([
+            Constraint::Percentage(45),
+            Constraint::Percentage(25),
+            Constraint::Percentage(30),
+        ])
         .split(body[1]);
 
     render_health(frame, right[0], &snapshot.health);
-    render_financials(frame, right[1], &snapshot.financials);
+    render_polymarket(frame, right[1], &snapshot.polymarket);
+    render_financials(frame, right[2], &snapshot.financials);
 }
 
 fn render_status_bar(frame: &mut Frame, area: Rect, status: &StatusBarData) {
@@ -52,37 +60,80 @@ fn render_status_bar(frame: &mut Frame, area: Rect, status: &StatusBarData) {
     } else {
         "OK".to_string()
     };
-    let binance_label = if status.binance_online { "ONLINE" } else { "OFFLINE" };
-    let allora_label = if status.allora_online { "ONLINE" } else { "OFFLINE" };
+    let binance_label = if status.binance_online {
+        "ONLINE"
+    } else {
+        "OFFLINE"
+    };
+    let allora_label = if status.allora_online {
+        "ONLINE"
+    } else {
+        "OFFLINE"
+    };
+    let polymarket_label = if status.polymarket_online {
+        "ONLINE"
+    } else {
+        "OFFLINE"
+    };
 
     let spans = vec![
-        Span::styled("Bankai", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::raw(" | uptime: "),
-        Span::styled(format_duration(status.uptime), Style::default().fg(Color::White)),
-        Span::raw(" | risk: "),
+        Span::styled(
+            " Bankai ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled("Uptime", Style::default().fg(Color::DarkGray)),
+        Span::raw(": "),
+        Span::styled(
+            format_duration(status.uptime),
+            Style::default().fg(Color::White),
+        ),
+        Span::raw("  "),
+        Span::styled("Risk", Style::default().fg(Color::DarkGray)),
+        Span::raw(": "),
         Span::styled(risk_label, risk_style),
-        Span::raw(" | binance: "),
+        Span::raw("  "),
+        Span::styled("Binance", Style::default().fg(Color::DarkGray)),
+        Span::raw(": "),
         Span::styled(binance_label, oracle_style(status.binance_online)),
-        Span::raw(" | allora: "),
+        Span::raw("  "),
+        Span::styled("Allora", Style::default().fg(Color::DarkGray)),
+        Span::raw(": "),
         Span::styled(allora_label, oracle_style(status.allora_online)),
+        Span::raw("  "),
+        Span::styled("Polymarket", Style::default().fg(Color::DarkGray)),
+        Span::raw(": "),
+        Span::styled(polymarket_label, oracle_style(status.polymarket_online)),
     ];
 
-    let paragraph = Paragraph::new(Line::from(spans)).alignment(Alignment::Left);
+    let paragraph = Paragraph::new(Line::from(spans))
+        .alignment(Alignment::Left)
+        .block(
+            Block::default()
+                .borders(Borders::NONE)
+                .style(Style::default().bg(Color::Black)),
+        );
     frame.render_widget(paragraph, area);
 }
 
 fn render_markets(frame: &mut Frame, area: Rect, markets: &[MarketRow]) {
     let block = Block::default()
-        .title("Active Markets")
+        .title(Span::styled(
+            " Markets ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))
         .borders(Borders::ALL)
         .border_type(BorderType::Double)
         .style(Style::default().fg(Color::Cyan));
 
     if markets.is_empty() {
         let text = Text::from(Line::from("waiting for market data..."));
-        let paragraph = Paragraph::new(text)
-            .block(block)
-            .alignment(Alignment::Left);
+        let paragraph = Paragraph::new(text).block(block).alignment(Alignment::Left);
         frame.render_widget(paragraph, area);
         return;
     }
@@ -90,22 +141,32 @@ fn render_markets(frame: &mut Frame, area: Rect, markets: &[MarketRow]) {
     let header = Row::new(vec![
         Cell::from("Asset"),
         Cell::from("Price"),
-        Cell::from("Signal"),
-        Cell::from("EV(bps)"),
-        Cell::from("Fee(bps)"),
+        Cell::from("Sig 5m"),
+        Cell::from("Sig 8h"),
+        Cell::from("EV 5m"),
+        Cell::from("EV 8h"),
+        Cell::from("Fee"),
         Cell::from("Mode"),
+        Cell::from("Age"),
     ])
-    .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+    .style(
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    );
 
     let rows = markets.iter().map(|row| {
         let mode_style = mode_style(&row.mode);
         Row::new(vec![
             Cell::from(row.asset.clone()),
             Cell::from(format_optional_f64(row.price, 4)),
-            Cell::from(format_optional_f64(row.inference, 4)),
-            Cell::from(format_optional_f64(row.edge_bps, 1)),
+            Cell::from(format_optional_f64(row.inference_5m, 4)),
+            Cell::from(format_optional_f64(row.inference_8h, 4)),
+            Cell::from(format_optional_f64(row.edge_bps_5m, 1)),
+            Cell::from(format_optional_f64(row.edge_bps_8h, 1)),
             Cell::from(format_optional_f64(row.fee_bps, 1)),
             Cell::from(Span::styled(row.mode.label(), mode_style)),
+            Cell::from(format_age(row.last_update_ms)),
         ])
     });
 
@@ -118,6 +179,10 @@ fn render_markets(frame: &mut Frame, area: Rect, markets: &[MarketRow]) {
             Constraint::Length(10),
             Constraint::Length(10),
             Constraint::Length(10),
+            Constraint::Length(10),
+            Constraint::Length(10),
+            Constraint::Length(8),
+            Constraint::Length(6),
         ],
     )
     .header(header)
@@ -151,12 +216,19 @@ fn render_health(frame: &mut Frame, area: Rect, health: &HealthPanelData) {
     ];
 
     let block = Block::default()
-        .title("System Health")
+        .title(Span::styled(
+            " System Health ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))
         .borders(Borders::ALL)
         .border_type(BorderType::Double)
         .style(Style::default().fg(Color::Cyan));
 
-    let paragraph = Paragraph::new(lines).block(block).alignment(Alignment::Left);
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .alignment(Alignment::Left);
     frame.render_widget(paragraph, area);
 }
 
@@ -173,12 +245,62 @@ fn render_financials(frame: &mut Frame, area: Rect, financials: &FinancialPanelD
     ];
 
     let block = Block::default()
-        .title("Financials")
+        .title(Span::styled(
+            " Financials ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))
         .borders(Borders::ALL)
         .border_type(BorderType::Double)
         .style(Style::default().fg(Color::Cyan));
 
-    let paragraph = Paragraph::new(lines).block(block).alignment(Alignment::Left);
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .alignment(Alignment::Left);
+    frame.render_widget(paragraph, area);
+}
+
+fn render_polymarket(frame: &mut Frame, area: Rect, polymarket: &PolymarketPanelData) {
+    let status_style = oracle_style(polymarket.online);
+    let status_label = if polymarket.online {
+        "ONLINE"
+    } else {
+        "OFFLINE"
+    };
+    let count_line = match polymarket.asset_count {
+        Some(count) => format!("Assets discovered: {}", count),
+        None => "Assets discovered: --".to_string(),
+    };
+    let refresh_line = match polymarket.last_refresh {
+        Some(age) => format!("Last refresh: {}s ago", age.as_secs()),
+        None => "Last refresh: --".to_string(),
+    };
+
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("Status: ", Style::default().fg(Color::White)),
+            Span::styled(status_label, status_style),
+        ]),
+        Line::from(count_line),
+        Line::from(refresh_line),
+        Line::from("Source: Polymarket Gamma -> Redis asset ids"),
+    ];
+
+    let block = Block::default()
+        .title(Span::styled(
+            " Polymarket Discovery ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .style(Style::default().fg(Color::Cyan));
+
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .alignment(Alignment::Left);
     frame.render_widget(paragraph, area);
 }
 
@@ -215,9 +337,29 @@ fn mode_style(mode: &MarketMode) -> Style {
 
 fn oracle_style(online: bool) -> Style {
     if online {
-        Style::default().fg(Color::Green)
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::Red)
+        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+    }
+}
+
+fn format_age(last_update_ms: Option<u64>) -> String {
+    match last_update_ms {
+        Some(value) => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            if now == 0 || value == 0 {
+                "--".to_string()
+            } else {
+                let secs = now.saturating_sub(value) / 1000;
+                format!("{secs}s")
+            }
+        }
+        None => "--".to_string(),
     }
 }
 

@@ -87,9 +87,13 @@ impl PolymarketDiscovery {
                 break;
             }
             for market in &markets {
-                if let Some(metadata) =
-                    extract_market_metadata(market, self.config.min_liquidity)
-                {
+                if !is_open_market(market) {
+                    continue;
+                }
+                if !is_target_market(market) {
+                    continue;
+                }
+                if let Some(metadata) = extract_market_metadata(market, self.config.min_liquidity) {
                     self.redis
                         .set_market_metadata(
                             &metadata.market_id,
@@ -142,14 +146,154 @@ fn extract_market_metadata(market: &Value, min_liquidity: f64) -> Option<MarketM
     if is_augmented_negative_risk(market) {
         return None;
     }
-    let fee_rate_bps = parse_fee_rate_bps(market)?;
-    let min_tick_size = parse_min_tick_size(market)?;
+    let fee_rate_bps = parse_fee_rate_bps(market).unwrap_or(0.0);
+    let min_tick_size = parse_min_tick_size(market).unwrap_or(0.001);
 
     Some(MarketMetadata {
         market_id,
         fee_rate_bps,
         min_tick_size,
     })
+}
+
+fn is_open_market(market: &Value) -> bool {
+    let closed = market
+        .get("closed")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let active = market
+        .get("active")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(true);
+    !closed && active
+}
+
+fn is_target_market(market: &Value) -> bool {
+    let haystack = collect_text(market);
+    if haystack.is_empty() {
+        return false;
+    }
+
+    let tokens: Vec<String> = haystack
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .map(|t| t.to_string())
+        .collect();
+
+    let asset_match = contains_asset(&tokens);
+    if !asset_match {
+        return false;
+    }
+
+    let tag_match = contains_crypto_tag(market);
+    let has_price_term = contains_price_term(&tokens) || tag_match;
+    let has_time_term = contains_time_term(&tokens);
+    let has_range = contains_time_range(&tokens);
+    let has_number = tokens.iter().any(|t| t.chars().any(|c| c.is_ascii_digit()));
+
+    // Require asset + (price term and a number) OR asset + (time term or explicit range)
+    (has_price_term && has_number) || has_time_term || has_range
+}
+
+fn collect_text(market: &Value) -> String {
+    let mut parts = Vec::new();
+    for key in ["question", "title", "slug", "ticker", "groupItemTitle"] {
+        if let Some(value) = market.get(key).and_then(|v| v.as_str()) {
+            parts.push(value.to_ascii_lowercase());
+        }
+    }
+    if let Some(tags) = market.get("tags").and_then(|v| v.as_array()) {
+        for tag in tags {
+            if let Some(text) = tag.as_str() {
+                parts.push(text.to_ascii_lowercase());
+            }
+        }
+    }
+    parts.join(" ")
+}
+
+fn contains_asset(tokens: &[String]) -> bool {
+    static ASSET_WORDS: &[&str] = &["btc", "bitcoin", "eth", "ethereum", "sol", "solana"];
+    tokens
+        .iter()
+        .any(|t| ASSET_WORDS.iter().any(|w| t == w || t.ends_with(w)))
+}
+
+fn contains_crypto_tag(market: &Value) -> bool {
+    static TAGS: &[&str] = &[
+        "crypto",
+        "cryptocurrency",
+        "prices",
+        "crypto prices",
+        "digital assets",
+    ];
+    if let Some(list) = market.get("tags").and_then(|v| v.as_array()) {
+        for tag in list {
+            if let Some(text) = tag.as_str() {
+                let lower = text.to_ascii_lowercase();
+                if TAGS.iter().any(|wanted| lower.contains(wanted)) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn contains_price_term(tokens: &[String]) -> bool {
+    static TERMS: &[&str] = &[
+        "price", "usd", "usdt", "reach", "above", "below", "over", "under", "hit", "cross",
+    ];
+    tokens.iter().any(|t| TERMS.iter().any(|w| t.contains(w)))
+}
+
+fn contains_time_term(tokens: &[String]) -> bool {
+    static MONTHS: &[&str] = &[
+        "jan",
+        "feb",
+        "mar",
+        "apr",
+        "may",
+        "jun",
+        "jul",
+        "aug",
+        "sep",
+        "oct",
+        "nov",
+        "dec",
+        "january",
+        "february",
+        "march",
+        "april",
+        "june",
+        "july",
+        "august",
+        "september",
+        "october",
+        "november",
+        "december",
+    ];
+    static WINDOWS: &[&str] = &[
+        "15m", "30m", "1h", "4h", "24h", "1d", "day", "week", "hour", "minute",
+    ];
+
+    tokens.iter().any(|t| {
+        MONTHS.iter().any(|m| t.starts_with(m))
+            || WINDOWS.iter().any(|w| t == w || t.ends_with(w))
+            || is_clock_time(t)
+    })
+}
+
+fn contains_time_range(tokens: &[String]) -> bool {
+    tokens.windows(3).any(|w| {
+        is_clock_time(&w[0]) && (w[1] == "-" || w[1] == "to" || w[1] == "–") && is_clock_time(&w[2])
+    })
+}
+
+fn is_clock_time(token: &str) -> bool {
+    let has_colon = token.contains(':');
+    let digits = token.chars().filter(|c| c.is_ascii_digit()).count();
+    has_colon && digits >= 2
 }
 
 fn parse_market_id(market: &Value) -> Option<String> {
@@ -174,7 +318,15 @@ fn parse_liquidity(market: &Value) -> Option<f64> {
 }
 
 fn parse_fee_rate_bps(market: &Value) -> Option<f64> {
-    let candidates = ["feeRateBps", "fee_rate_bps", "feeBps", "fee_bps", "fee"];
+    let candidates = [
+        "feeRateBps",
+        "fee_rate_bps",
+        "feeBps",
+        "fee_bps",
+        "fee",
+        "makerFeeRateBps",
+        "takerFeeRateBps",
+    ];
     for key in candidates {
         if let Some(value) = market.get(key) {
             if let Some(parsed) = parse_numeric(value) {
@@ -186,7 +338,13 @@ fn parse_fee_rate_bps(market: &Value) -> Option<f64> {
 }
 
 fn parse_min_tick_size(market: &Value) -> Option<f64> {
-    let candidates = ["minTickSize", "min_tick_size", "tickSize", "tick_size"];
+    let candidates = [
+        "minTickSize",
+        "min_tick_size",
+        "tickSize",
+        "tick_size",
+        "orderPriceMinTickSize",
+    ];
     for key in candidates {
         if let Some(value) = market.get(key) {
             if let Some(parsed) = parse_numeric(value) {

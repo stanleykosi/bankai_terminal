@@ -1,3 +1,4 @@
+pub mod accounting;
 /**
  * @description
  * Shared library exports for the Bankai Terminal binaries.
@@ -9,10 +10,9 @@
  * - Keep module exports aligned with the src/ layout.
  */
 pub mod config;
-pub mod accounting;
 pub mod engine;
-pub mod execution;
 pub mod error;
+pub mod execution;
 pub mod oracle;
 pub mod security;
 pub mod storage;

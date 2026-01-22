@@ -66,9 +66,7 @@ pub struct PolymarketRtds {
 
 impl PolymarketRtds {
     pub fn new(config: PolymarketRtdsConfig, orderbook: OrderBookStore) -> Result<Self> {
-        let client = Client::builder()
-            .timeout(config.snapshot_timeout)
-            .build()?;
+        let client = Client::builder().timeout(config.snapshot_timeout).build()?;
         Ok(Self {
             config,
             client,
@@ -255,11 +253,11 @@ fn parse_snapshot(value: &Value) -> Result<OrderBookSnapshot> {
 }
 
 fn parse_snapshot_levels(value: Option<&Value>, field: &str) -> Result<Vec<OrderBookLevel>> {
-    let levels = value
-        .ok_or_else(|| BankaiError::InvalidArgument(format!("snapshot missing {field}")))?;
-    let entries = levels.as_array().ok_or_else(|| {
-        BankaiError::InvalidArgument(format!("snapshot {field} not an array"))
-    })?;
+    let levels =
+        value.ok_or_else(|| BankaiError::InvalidArgument(format!("snapshot missing {field}")))?;
+    let entries = levels
+        .as_array()
+        .ok_or_else(|| BankaiError::InvalidArgument(format!("snapshot {field} not an array")))?;
 
     let mut parsed = Vec::with_capacity(entries.len());
     for entry in entries {
@@ -280,7 +278,9 @@ fn parse_price_change_event(text: &str) -> Result<Option<Vec<PriceChange>>> {
         return Ok(None);
     };
 
-    let event_type = event_source.get("event_type").and_then(|value| value.as_str());
+    let event_type = event_source
+        .get("event_type")
+        .and_then(|value| value.as_str());
     if event_type != Some("price_change") {
         return Ok(None);
     }
@@ -341,35 +341,27 @@ fn parse_side(value: Option<&Value>) -> Result<BookSide> {
 }
 
 fn parse_numeric(value: Option<&Value>, field: &str) -> Result<f64> {
-    let value = value
-        .ok_or_else(|| BankaiError::InvalidArgument(format!("{field} missing")))?;
+    let value = value.ok_or_else(|| BankaiError::InvalidArgument(format!("{field} missing")))?;
     if let Some(number) = value.as_f64() {
         return Ok(number);
     }
     if let Some(text) = value.as_str() {
-        return text.parse::<f64>().map_err(|_| {
-            BankaiError::InvalidArgument(format!("{field} not numeric"))
-        });
+        return text
+            .parse::<f64>()
+            .map_err(|_| BankaiError::InvalidArgument(format!("{field} not numeric")));
     }
-    Err(BankaiError::InvalidArgument(format!(
-        "{field} invalid"
-    )))
+    Err(BankaiError::InvalidArgument(format!("{field} invalid")))
 }
 
 fn parse_string(value: Option<&Value>, field: &str) -> Result<String> {
-    let value = value
-        .ok_or_else(|| BankaiError::InvalidArgument(format!("{field} missing")))?;
+    let value = value.ok_or_else(|| BankaiError::InvalidArgument(format!("{field} missing")))?;
     if let Some(text) = value.as_str() {
         if text.trim().is_empty() {
-            return Err(BankaiError::InvalidArgument(format!(
-                "{field} empty"
-            )));
+            return Err(BankaiError::InvalidArgument(format!("{field} empty")));
         }
         return Ok(text.trim().to_string());
     }
-    Err(BankaiError::InvalidArgument(format!(
-        "{field} invalid"
-    )))
+    Err(BankaiError::InvalidArgument(format!("{field} invalid")))
 }
 
 fn asset_ids_changed(current: &[String], latest: &[String]) -> bool {

@@ -195,9 +195,8 @@ fn parse_chrony_offset_seconds(output: &str) -> Option<f64> {
 
 fn extract_first_float(line: &str) -> Option<f64> {
     for token in line.split_whitespace() {
-        let cleaned = token.trim_matches(|c: char| {
-            !c.is_ascii_digit() && c != '.' && c != '-' && c != '+'
-        });
+        let cleaned =
+            token.trim_matches(|c: char| !c.is_ascii_digit() && c != '.' && c != '-' && c != '+');
         if cleaned.is_empty() || cleaned == "-" || cleaned == "+" {
             continue;
         }

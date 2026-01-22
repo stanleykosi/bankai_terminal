@@ -153,12 +153,8 @@ mod tests {
 
     #[test]
     fn it_rejects_invalid_probabilities() {
-        let err = analyze_opportunity(
-            sample_input(1.2, 0.5),
-            &base_strategy(),
-            &base_fees(),
-        )
-        .unwrap_err();
+        let err = analyze_opportunity(sample_input(1.2, 0.5), &base_strategy(), &base_fees())
+            .unwrap_err();
         match err {
             BankaiError::InvalidArgument(msg) => assert!(msg.contains("implied_prob")),
             _ => panic!("unexpected error variant"),
@@ -176,12 +172,8 @@ mod tests {
 
     #[test]
     fn it_returns_ladder_when_edge_below_snipe_floor() {
-        let result = analyze_opportunity(
-            sample_input(0.45, 0.495),
-            &base_strategy(),
-            &base_fees(),
-        )
-        .unwrap();
+        let result =
+            analyze_opportunity(sample_input(0.45, 0.495), &base_strategy(), &base_fees()).unwrap();
         assert_eq!(result.decision, TradeDecision::Ladder);
 
         let intent = result.intent.expect("ladder intent");

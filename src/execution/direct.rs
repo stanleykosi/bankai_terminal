@@ -241,14 +241,9 @@ impl DirectExecutionClient {
     }
 
     pub fn encode_fill_orders(&self, request: &FillOrdersRequest) -> Result<Bytes> {
-        let function = self
-            .exchange_abi
-            .function("fillOrders")
-            .map_err(|err| {
-                BankaiError::InvalidArgument(format!(
-                    "fillOrders function missing from ABI: {err}"
-                ))
-            })?;
+        let function = self.exchange_abi.function("fillOrders").map_err(|err| {
+            BankaiError::InvalidArgument(format!("fillOrders function missing from ABI: {err}"))
+        })?;
         let tokens = request.to_tokens()?;
         let data = function.encode_input(&tokens).map_err(|err| {
             BankaiError::InvalidArgument(format!("fillOrders encode failed: {err}"))
@@ -256,7 +251,10 @@ impl DirectExecutionClient {
         Ok(Bytes::from(data))
     }
 
-    pub async fn send_fill_orders(&self, request: &FillOrdersRequest) -> Result<DirectExecutionResult> {
+    pub async fn send_fill_orders(
+        &self,
+        request: &FillOrdersRequest,
+    ) -> Result<DirectExecutionResult> {
         let calldata = self.encode_fill_orders(request)?;
         self.send_call_data(calldata, &request.options).await
     }
@@ -314,9 +312,10 @@ impl DirectExecutionClient {
 }
 
 fn build_wallet(secrets: &Secrets, chain_id: u64) -> Result<LocalWallet> {
-    let key = secrets.polygon_private_key.as_ref().ok_or_else(|| {
-        BankaiError::InvalidArgument("polygon private key missing".to_string())
-    })?;
+    let key = secrets
+        .polygon_private_key
+        .as_ref()
+        .ok_or_else(|| BankaiError::InvalidArgument("polygon private key missing".to_string()))?;
     let trimmed = key.expose_secret().trim();
     if trimmed.is_empty() {
         return Err(BankaiError::InvalidArgument(
@@ -330,9 +329,8 @@ fn build_wallet(secrets: &Secrets, chain_id: u64) -> Result<LocalWallet> {
 
 fn build_provider(config: &DirectExecutionConfig) -> Result<Provider<Http>> {
     let client = build_http_client(config)?;
-    let url = reqwest::Url::parse(config.rpc_url.trim()).map_err(|_| {
-        BankaiError::InvalidArgument("polygon rpc url is invalid".to_string())
-    })?;
+    let url = reqwest::Url::parse(config.rpc_url.trim())
+        .map_err(|_| BankaiError::InvalidArgument("polygon rpc url is invalid".to_string()))?;
     let http = Http::new_with_client(url, client);
     Ok(Provider::new(http))
 }
@@ -349,9 +347,8 @@ fn build_http_client(config: &DirectExecutionConfig) -> Result<reqwest::Client> 
 fn build_rpc_headers(headers: &HashMap<String, String>) -> Result<HeaderMap> {
     let mut map = HeaderMap::new();
     for (key, value) in headers {
-        let name = HeaderName::from_str(key).map_err(|_| {
-            BankaiError::InvalidArgument(format!("invalid rpc header name: {key}"))
-        })?;
+        let name = HeaderName::from_str(key)
+            .map_err(|_| BankaiError::InvalidArgument(format!("invalid rpc header name: {key}")))?;
         let value = HeaderValue::from_str(value).map_err(|_| {
             BankaiError::InvalidArgument(format!("invalid rpc header value for {key}"))
         })?;
@@ -373,9 +370,9 @@ fn load_exchange_abi(path: &Path) -> Result<Abi> {
     match value {
         Value::Array(_) => Ok(serde_json::from_value(value)?),
         Value::Object(mut map) => {
-            let abi_value = map
-                .remove("abi")
-                .ok_or_else(|| BankaiError::InvalidArgument("ctf exchange abi missing".to_string()))?;
+            let abi_value = map.remove("abi").ok_or_else(|| {
+                BankaiError::InvalidArgument("ctf exchange abi missing".to_string())
+            })?;
             Ok(serde_json::from_value(abi_value)?)
         }
         _ => Err(BankaiError::InvalidArgument(
@@ -405,9 +402,8 @@ fn strip_jsdoc_header(contents: &str) -> Result<&str> {
 }
 
 fn parse_address(value: &str, field: &str) -> Result<Address> {
-    Address::from_str(value.trim()).map_err(|_| {
-        BankaiError::InvalidArgument(format!("{field} is not a valid address"))
-    })
+    Address::from_str(value.trim())
+        .map_err(|_| BankaiError::InvalidArgument(format!("{field} is not a valid address")))
 }
 
 async fn resolve_nonce(
@@ -468,8 +464,7 @@ async fn resolve_fee_data(
     }
 
     let max_fee = max_fee.unwrap_or_else(|| gwei_to_wei(DEFAULT_MAX_FEE_GWEI));
-    let mut max_priority =
-        max_priority.unwrap_or_else(|| gwei_to_wei(DEFAULT_PRIORITY_FEE_GWEI));
+    let mut max_priority = max_priority.unwrap_or_else(|| gwei_to_wei(DEFAULT_PRIORITY_FEE_GWEI));
     if max_priority > max_fee {
         max_priority = max_fee;
     }

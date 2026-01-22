@@ -156,7 +156,10 @@ fn build_consumer_url(base_url: &str, chain: &str, topic: &AlloraConsumerTopic) 
     }
 
     if let Some(topic_id) = topic.topic_id {
-        return Ok(format!("{}/{}?allora_topic_id={}", base, chain_path, topic_id));
+        return Ok(format!(
+            "{}/{}?allora_topic_id={}",
+            base, chain_path, topic_id
+        ));
     }
 
     if topic.asset.trim().is_empty() || topic.timeframe.trim().is_empty() {
@@ -206,9 +209,8 @@ fn parse_inference_value(inference: &Value, data: &Value) -> Result<ParsedInfere
         });
     }
 
-    let raw_value = raw_value.ok_or_else(|| {
-        BankaiError::InvalidArgument("network_inference missing".to_string())
-    })?;
+    let raw_value = raw_value
+        .ok_or_else(|| BankaiError::InvalidArgument("network_inference missing".to_string()))?;
     let decimals = token_decimals.ok_or_else(|| {
         BankaiError::InvalidArgument("token_decimals missing for inference".to_string())
     })?;
@@ -235,9 +237,7 @@ fn parse_topic_id(inference: &Value) -> Result<u64> {
             .parse::<u64>()
             .map_err(|_| BankaiError::InvalidArgument("topic_id not numeric".to_string()));
     }
-    Err(BankaiError::InvalidArgument(
-        "topic_id invalid".to_string(),
-    ))
+    Err(BankaiError::InvalidArgument("topic_id invalid".to_string()))
 }
 
 fn parse_timestamp_ms(value: Option<&Value>) -> Result<u64> {

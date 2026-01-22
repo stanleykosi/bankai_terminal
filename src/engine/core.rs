@@ -86,7 +86,9 @@ impl EngineCore {
     ) -> Result<()> {
         let config = self.config.load_full();
         self.record_latency(update.event_time_ms)?;
-        state.last_binance.insert(update.asset.clone(), update.clone());
+        state
+            .last_binance
+            .insert(update.asset.clone(), update.clone());
 
         if self.risk.is_halted() {
             tracing::warn!(asset = %update.asset, "risk halt active; skipping binance update");
@@ -95,10 +97,8 @@ impl EngineCore {
 
         if let Some(volatility) = update.volatility_1m {
             if volatility > config.trading.max_volatility {
-                let is_neutral = is_neutral_signal(
-                    state.last_allora.get(&update.asset),
-                    resolve_price(&update),
-                );
+                let is_neutral =
+                    is_neutral_signal(state.last_allora.get(&update.asset), resolve_price(&update));
                 if is_neutral {
                     tracing::warn!(
                         asset = %update.asset,
@@ -118,7 +118,9 @@ impl EngineCore {
         state: &mut EngineState,
         update: AlloraMarketUpdate,
     ) -> Result<()> {
-        state.last_allora.insert(update.asset.clone(), update.clone());
+        state
+            .last_allora
+            .insert(update.asset.clone(), update.clone());
         if self.risk.is_halted() {
             tracing::warn!(asset = %update.asset, "risk halt active; skipping allora update");
         }

@@ -118,10 +118,7 @@ impl ExecutionOrchestrator {
         })
     }
 
-    pub fn spawn(
-        self,
-        mut receiver: mpsc::Receiver<TradeIntent>,
-    ) -> tokio::task::JoinHandle<()> {
+    pub fn spawn(self, mut receiver: mpsc::Receiver<TradeIntent>) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             while let Some(intent) = receiver.recv().await {
                 if let Err(error) = self.handle_intent(intent).await {
@@ -193,10 +190,7 @@ impl ExecutionOrchestrator {
                         })
                     }
                     Err(direct_error) => {
-                        metadata.insert(
-                            "direct".to_string(),
-                            direct_error_metadata(&direct_error),
-                        );
+                        metadata.insert("direct".to_string(), direct_error_metadata(&direct_error));
                         Ok(ExecutionReport {
                             success: false,
                             rail: ExecutionRail::Direct,
@@ -224,10 +218,7 @@ impl ExecutionOrchestrator {
             Ok(result) => result,
             Err(_) => Err(RelayerError {
                 kind: RelayerErrorKind::Timeout,
-                message: format!(
-                    "relayer request exceeded {}ms",
-                    duration_to_ms(timeout)
-                ),
+                message: format!("relayer request exceeded {}ms", duration_to_ms(timeout)),
                 status: None,
                 body: None,
                 latency_ms: Some(duration_to_ms(timeout)),

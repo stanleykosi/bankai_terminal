@@ -16,13 +16,13 @@ use bankai_terminal::config::{Config, ConfigManager};
 use bankai_terminal::engine::core::EngineCore;
 use bankai_terminal::engine::risk::{KillSwitchConfig, RiskState};
 use bankai_terminal::engine::types::MarketUpdate;
+use bankai_terminal::error::Result;
 use bankai_terminal::oracle::allora::{AlloraConsumerTopic, AlloraOracle, AlloraOracleConfig};
 use bankai_terminal::oracle::binance::{BinanceOracle, BinanceOracleConfig};
 use bankai_terminal::oracle::polymarket_discovery::{
     PolymarketDiscovery, PolymarketDiscoveryConfig,
 };
 use bankai_terminal::oracle::polymarket_rtds::{PolymarketRtds, PolymarketRtdsConfig};
-use bankai_terminal::error::{BankaiError, Result};
 use bankai_terminal::security::{self, DEFAULT_SECRETS_PATH};
 use bankai_terminal::storage::orderbook::OrderBookStore;
 use bankai_terminal::storage::redis::RedisManager;
@@ -39,6 +39,7 @@ async fn main() -> Result<()> {
     logging::init_tracing();
     metrics::init_metrics();
     tracing::info!("bankai terminal booting");
+    let mut preflight_ok = true;
 
     let config_manager = ConfigManager::new("config/config.json")?;
     let _watcher = config_manager.spawn_watcher()?;
@@ -53,22 +54,37 @@ async fn main() -> Result<()> {
         let report = preflight::run(&config).await?;
         preflight::log_report(&report);
         if config.preflight.fail_fast && report.has_failures() {
-            return Err(BankaiError::InvalidArgument(
-                "startup preflight checks failed".to_string(),
-            ));
+            preflight_ok = false;
+            tracing::warn!(
+                "[FAIL] preflight checks failed; trading halted but TUI will start for inspection"
+            );
+        } else if report.has_failures() {
+            preflight_ok = false;
+            tracing::warn!("[WARN] preflight checks failed; trading halted but continuing to UI");
+        } else {
+            tracing::info!("[OK] preflight checks passed");
         }
     } else {
         tracing::info!("startup preflight checks disabled");
     }
 
+    let mut bankroll_ready = false;
     if let Ok(redis_url) = std::env::var("REDIS_URL") {
         match RedisManager::new(&redis_url).await {
             Ok(redis) => match StartupRecovery::from_env(&config, &secrets, redis) {
-                Ok(Some(recovery)) => {
-                    if let Err(error) = recovery.run().await {
+                Ok(Some(recovery)) => match recovery.run().await {
+                    Ok(report) => {
+                        bankroll_ready = report.collateral_balance > 0.0;
+                        tracing::info!(
+                            bankroll_ready,
+                            balance_usdc = report.collateral_balance,
+                            "startup recovery completed"
+                        );
+                    }
+                    Err(error) => {
                         tracing::warn!(?error, "startup recovery failed");
                     }
-                }
+                },
                 Ok(None) => {
                     tracing::info!("startup recovery skipped");
                 }
@@ -87,6 +103,15 @@ async fn main() -> Result<()> {
     let risk = Arc::new(RiskState::new(KillSwitchConfig::from_trading(
         &config.trading,
     )));
+    if !preflight_ok {
+        risk.manual_halt();
+    }
+    if !bankroll_ready {
+        tracing::warn!(
+            "bankroll missing or zero at startup; trading halted until funds are detected"
+        );
+        risk.manual_halt();
+    }
     let _health = HealthMonitor::from_config(risk.clone(), &config.health)?.spawn();
 
     let (market_tx, _) = broadcast::channel(1024);
@@ -165,7 +190,8 @@ async fn spawn_polymarket_oracles(config: &Arc<Config>) -> Result<()> {
     };
 
     let redis = RedisManager::new(&redis_url).await?;
-    let discovery_config = PolymarketDiscoveryConfig::new(config.endpoints.polymarket_gamma.clone());
+    let discovery_config =
+        PolymarketDiscoveryConfig::new(config.endpoints.polymarket_gamma.clone());
     let discovery = PolymarketDiscovery::new(discovery_config, redis.clone())?;
     let _discovery_handle = discovery.spawn();
 

@@ -141,7 +141,10 @@ fn encrypt_payload(password: &SecretString, payload: &SecretsPayload) -> Result<
     })
 }
 
-fn decrypt_payload(password: &SecretString, encrypted: &EncryptedSecrets) -> Result<SecretsPayload> {
+fn decrypt_payload(
+    password: &SecretString,
+    encrypted: &EncryptedSecrets,
+) -> Result<SecretsPayload> {
     if encrypted.version != SECRETS_VERSION {
         return Err(BankaiError::InvalidArgument(format!(
             "unsupported secrets version {}",
@@ -176,11 +179,7 @@ fn decrypt_payload(password: &SecretString, encrypted: &EncryptedSecrets) -> Res
 
 fn derive_key(password: &SecretString, salt: &[u8]) -> Result<[u8; 32]> {
     let mut key = [0u8; 32];
-    Argon2::default().hash_password_into(
-        password.expose_secret().as_bytes(),
-        salt,
-        &mut key,
-    )?;
+    Argon2::default().hash_password_into(password.expose_secret().as_bytes(), salt, &mut key)?;
     Ok(key)
 }
 

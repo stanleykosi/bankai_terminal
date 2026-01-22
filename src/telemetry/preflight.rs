@@ -654,9 +654,8 @@ fn build_gamma_url(base_url: &str) -> Result<String> {
             "gamma base url is empty".to_string(),
         ));
     }
-    let mut url = reqwest::Url::parse(base).map_err(|_| {
-        BankaiError::InvalidArgument("gamma base url is invalid".to_string())
-    })?;
+    let mut url = reqwest::Url::parse(base)
+        .map_err(|_| BankaiError::InvalidArgument("gamma base url is invalid".to_string()))?;
     url.set_path("markets");
     url.query_pairs_mut().append_pair("limit", "1");
     Ok(url.to_string())
@@ -669,9 +668,8 @@ fn build_relayer_url(base_url: &str) -> Result<String> {
             "relayer base url is empty".to_string(),
         ));
     }
-    let mut url = reqwest::Url::parse(base).map_err(|_| {
-        BankaiError::InvalidArgument("relayer base url is invalid".to_string())
-    })?;
+    let mut url = reqwest::Url::parse(base)
+        .map_err(|_| BankaiError::InvalidArgument("relayer base url is invalid".to_string()))?;
     url.set_path("order");
     Ok(url.to_string())
 }

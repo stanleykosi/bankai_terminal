@@ -142,9 +142,7 @@ impl AssetState {
                 if let Some(vol) = self.volatility.update(price, event_time_ms) {
                     self.last_volatility = Some(vol);
                 }
-                let dfo = self
-                    .candle_open_price
-                    .map(|open| (price - open) / open);
+                let dfo = self.candle_open_price.map(|open| (price - open) / open);
 
                 Ok(Some(BinanceMarketUpdate {
                     asset: symbol,
@@ -253,12 +251,7 @@ fn subscribe_payload(symbols: &[String]) -> Result<String> {
     let params: Vec<String> = symbols
         .iter()
         .map(|symbol| symbol.to_ascii_lowercase())
-        .flat_map(|symbol| {
-            vec![
-                format!("{symbol}@aggTrade"),
-                format!("{symbol}@bookTicker"),
-            ]
-        })
+        .flat_map(|symbol| vec![format!("{symbol}@aggTrade"), format!("{symbol}@bookTicker")])
         .collect();
 
     if params.is_empty() {

@@ -300,14 +300,8 @@ fn apply_builder_headers(
         HEADER_BUILDER_PASSPHRASE,
         header_value(&payload.passphrase)?,
     );
-    headers.insert(
-        HEADER_BUILDER_SIGNATURE,
-        header_value(&payload.signature)?,
-    );
-    headers.insert(
-        HEADER_BUILDER_TIMESTAMP,
-        header_value(&payload.timestamp)?,
-    );
+    headers.insert(HEADER_BUILDER_SIGNATURE, header_value(&payload.signature)?);
+    headers.insert(HEADER_BUILDER_TIMESTAMP, header_value(&payload.timestamp)?);
 
     Ok(())
 }
@@ -318,9 +312,7 @@ fn build_builder_headers(
     path: &str,
     body: &str,
 ) -> RelayerResult<RelayerBuilderHeaders> {
-    let timestamp = credentials
-        .timestamp
-        .unwrap_or_else(current_unix_timestamp);
+    let timestamp = credentials.timestamp.unwrap_or_else(current_unix_timestamp);
     let signature = build_builder_signature(&credentials.secret, timestamp, method, path, body)?;
     Ok(RelayerBuilderHeaders {
         api_key: credentials.api_key.clone(),
@@ -337,13 +329,12 @@ fn build_builder_signature(
     path: &str,
     body: &str,
 ) -> RelayerResult<String> {
-    let key = general_purpose::STANDARD
-        .decode(secret)
-        .map_err(|err| RelayerError::invalid_request(format!("builder secret decode error: {err}")))?;
-    let message = format!("{timestamp}{method}{path}{body}");
-    let mut mac = HmacSha256::new_from_slice(&key).map_err(|_| {
-        RelayerError::invalid_request("builder secret is invalid for hmac")
+    let key = general_purpose::STANDARD.decode(secret).map_err(|err| {
+        RelayerError::invalid_request(format!("builder secret decode error: {err}"))
     })?;
+    let message = format!("{timestamp}{method}{path}{body}");
+    let mut mac = HmacSha256::new_from_slice(&key)
+        .map_err(|_| RelayerError::invalid_request("builder secret is invalid for hmac"))?;
     mac.update(message.as_bytes());
     let result = mac.finalize().into_bytes();
     let signature = general_purpose::STANDARD.encode(result);
@@ -377,10 +368,7 @@ fn extract_request_id(headers: &HeaderMap) -> Option<String> {
     None
 }
 
-async fn read_response_body(
-    response: reqwest::Response,
-    latency_ms: u64,
-) -> RelayerResult<Value> {
+async fn read_response_body(response: reqwest::Response, latency_ms: u64) -> RelayerResult<Value> {
     let bytes = response
         .bytes()
         .await

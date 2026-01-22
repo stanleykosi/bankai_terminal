@@ -204,9 +204,8 @@ impl ClobClient {
         asset_id: Option<&str>,
         limit: usize,
     ) -> Result<Vec<OpenOrderSnapshot>> {
-        let mut url = Url::parse(self.base_url.trim_end_matches('/')).map_err(|_| {
-            BankaiError::InvalidArgument("clob base url is invalid".to_string())
-        })?;
+        let mut url = Url::parse(self.base_url.trim_end_matches('/'))
+            .map_err(|_| BankaiError::InvalidArgument("clob base url is invalid".to_string()))?;
         url.set_path(self.orders_path.trim_start_matches('/'));
         {
             let mut pairs = url.query_pairs_mut();
@@ -222,12 +221,7 @@ impl ClobClient {
 
         let request_path = build_request_path(&url);
         let headers = build_clob_headers(&self.auth, "GET", &request_path, "")?;
-        let response = self
-            .client
-            .get(url)
-            .headers(headers)
-            .send()
-            .await?;
+        let response = self.client.get(url).headers(headers).send().await?;
         if !response.status().is_success() {
             return Err(BankaiError::Rpc(format!(
                 "clob orders request failed with status {}",
@@ -296,8 +290,7 @@ impl StartupRecovery {
 
         let asset_ids = self.resolve_asset_ids().await?;
         let collateral_balance = self.fetch_collateral_balance().await?;
-        let collateral_scaled =
-            scale_u256(collateral_balance, self.config.collateral_decimals)?;
+        let collateral_scaled = scale_u256(collateral_balance, self.config.collateral_decimals)?;
         self.redis
             .set_float(BANKROLL_REDIS_KEY, collateral_scaled)
             .await?;
@@ -358,7 +351,9 @@ impl StartupRecovery {
         let data = self
             .erc20_balance_of
             .encode_input(&[Token::Address(self.wallet_address)])
-            .map_err(|err| BankaiError::InvalidArgument(format!("balanceOf encode failed: {err}")))?;
+            .map_err(|err| {
+                BankaiError::InvalidArgument(format!("balanceOf encode failed: {err}"))
+            })?;
         let tx = TransactionRequest {
             to: Some(self.collateral_token.into()),
             data: Some(Bytes::from(data)),
@@ -373,7 +368,9 @@ impl StartupRecovery {
         let decoded = self
             .erc20_balance_of
             .decode_output(raw.as_ref())
-            .map_err(|err| BankaiError::InvalidArgument(format!("balanceOf decode failed: {err}")))?;
+            .map_err(|err| {
+                BankaiError::InvalidArgument(format!("balanceOf decode failed: {err}"))
+            })?;
         decode_balance(&decoded)
     }
 
@@ -400,10 +397,7 @@ impl StartupRecovery {
     async fn fetch_conditional_balance(&self, token_id: U256) -> Result<U256> {
         let data = self
             .erc1155_balance_of
-            .encode_input(&[
-                Token::Address(self.wallet_address),
-                Token::Uint(token_id),
-            ])
+            .encode_input(&[Token::Address(self.wallet_address), Token::Uint(token_id)])
             .map_err(|err| {
                 BankaiError::InvalidArgument(format!("erc1155 balanceOf encode failed: {err}"))
             })?;
@@ -489,10 +483,7 @@ struct RecoveredPosition {
     balance: f64,
 }
 
-fn insert_orders(
-    orders: &mut HashMap<String, OpenOrderSnapshot>,
-    batch: Vec<OpenOrderSnapshot>,
-) {
+fn insert_orders(orders: &mut HashMap<String, OpenOrderSnapshot>, batch: Vec<OpenOrderSnapshot>) {
     for order in batch {
         if order.id.trim().is_empty() {
             continue;
@@ -542,12 +533,7 @@ fn build_clob_client(
     Ok(Some(client))
 }
 
-fn build_clob_headers(
-    auth: &ClobAuth,
-    method: &str,
-    path: &str,
-    body: &str,
-) -> Result<HeaderMap> {
+fn build_clob_headers(auth: &ClobAuth, method: &str, path: &str, body: &str) -> Result<HeaderMap> {
     let timestamp = current_unix_timestamp();
     let signature = build_hmac_signature(&auth.secret, timestamp, method, path, body)?;
 
@@ -567,13 +553,12 @@ fn build_hmac_signature(
     path: &str,
     body: &str,
 ) -> Result<String> {
-    let key = general_purpose::STANDARD.decode(secret).map_err(|err| {
-        BankaiError::InvalidArgument(format!("api secret decode error: {err}"))
-    })?;
+    let key = general_purpose::STANDARD
+        .decode(secret)
+        .map_err(|err| BankaiError::InvalidArgument(format!("api secret decode error: {err}")))?;
     let message = format!("{timestamp}{method}{path}{body}");
-    let mut mac = HmacSha256::new_from_slice(&key).map_err(|_| {
-        BankaiError::InvalidArgument("api secret is invalid for hmac".to_string())
-    })?;
+    let mut mac = HmacSha256::new_from_slice(&key)
+        .map_err(|_| BankaiError::InvalidArgument("api secret is invalid for hmac".to_string()))?;
     mac.update(message.as_bytes());
     let result = mac.finalize().into_bytes();
     let signature = general_purpose::STANDARD.encode(result);
@@ -588,9 +573,8 @@ fn build_request_path(url: &Url) -> String {
 }
 
 fn build_provider(config: &RecoveryConfig) -> Result<Provider<Http>> {
-    let url = reqwest::Url::parse(config.polygon_rpc.trim()).map_err(|_| {
-        BankaiError::InvalidArgument("polygon rpc url is invalid".to_string())
-    })?;
+    let url = reqwest::Url::parse(config.polygon_rpc.trim())
+        .map_err(|_| BankaiError::InvalidArgument("polygon rpc url is invalid".to_string()))?;
     let client = reqwest::Client::builder()
         .timeout(config.request_timeout)
         .build()?;
@@ -674,21 +658,19 @@ fn scale_u256(value: U256, decimals: u32) -> Result<f64> {
         format!("{}.{}", &raw[..split], &raw[split..])
     };
 
-    scaled.parse::<f64>().map_err(|_| {
-        BankaiError::InvalidArgument("failed to parse scaled balance".to_string())
-    })
+    scaled
+        .parse::<f64>()
+        .map_err(|_| BankaiError::InvalidArgument("failed to parse scaled balance".to_string()))
 }
 
 fn parse_u256(value: &str, field: &str) -> Result<U256> {
-    U256::from_dec_str(value.trim()).map_err(|_| {
-        BankaiError::InvalidArgument(format!("{field} is not a valid integer"))
-    })
+    U256::from_dec_str(value.trim())
+        .map_err(|_| BankaiError::InvalidArgument(format!("{field} is not a valid integer")))
 }
 
 fn parse_address(value: &str, field: &str) -> Result<Address> {
-    Address::from_str(value.trim()).map_err(|_| {
-        BankaiError::InvalidArgument(format!("{field} is not a valid address"))
-    })
+    Address::from_str(value.trim())
+        .map_err(|_| BankaiError::InvalidArgument(format!("{field} is not a valid address")))
 }
 
 fn positions_key(address: &str) -> String {
@@ -714,27 +696,27 @@ fn read_env_u64(key: &str) -> Result<Option<u64>> {
     let Some(raw) = read_env_value(key) else {
         return Ok(None);
     };
-    raw.parse::<u64>().map(Some).map_err(|_| {
-        BankaiError::InvalidArgument(format!("{key} must be a valid integer"))
-    })
+    raw.parse::<u64>()
+        .map(Some)
+        .map_err(|_| BankaiError::InvalidArgument(format!("{key} must be a valid integer")))
 }
 
 fn read_env_u32(key: &str) -> Result<Option<u32>> {
     let Some(raw) = read_env_value(key) else {
         return Ok(None);
     };
-    raw.parse::<u32>().map(Some).map_err(|_| {
-        BankaiError::InvalidArgument(format!("{key} must be a valid integer"))
-    })
+    raw.parse::<u32>()
+        .map(Some)
+        .map_err(|_| BankaiError::InvalidArgument(format!("{key} must be a valid integer")))
 }
 
 fn read_env_usize(key: &str) -> Result<Option<usize>> {
     let Some(raw) = read_env_value(key) else {
         return Ok(None);
     };
-    raw.parse::<usize>().map(Some).map_err(|_| {
-        BankaiError::InvalidArgument(format!("{key} must be a valid integer"))
-    })
+    raw.parse::<usize>()
+        .map(Some)
+        .map_err(|_| BankaiError::InvalidArgument(format!("{key} must be a valid integer")))
 }
 
 fn header_value(value: &str) -> Result<HeaderValue> {

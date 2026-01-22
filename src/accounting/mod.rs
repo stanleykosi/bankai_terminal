@@ -1,3 +1,4 @@
+pub mod recovery;
 /**
  * @purpose
  * Accounting modules for redemption and recovery workflows.
@@ -10,4 +11,3 @@
  * - Recovery rehydrates balances and open orders on startup.
  */
 pub mod redemption;
-pub mod recovery;

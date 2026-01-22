@@ -115,8 +115,7 @@ impl RedisManager {
     }
 
     pub async fn set_polymarket_asset_ids(&self, asset_ids: &[String]) -> Result<()> {
-        self.replace_set(POLYMARKET_ASSET_IDS_KEY, asset_ids)
-            .await
+        self.replace_set(POLYMARKET_ASSET_IDS_KEY, asset_ids).await
     }
 
     pub async fn get_polymarket_asset_ids(&self) -> Result<Vec<String>> {
