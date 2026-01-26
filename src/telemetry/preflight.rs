@@ -112,6 +112,7 @@ pub async fn run(config: &Config) -> Result<PreflightReport> {
     let polygon_rpc = config.endpoints.polygon_rpc.clone();
     let binance_ws = config.endpoints.binance_ws.clone();
     let polymarket_ws = config.endpoints.polymarket_ws.clone();
+    let polymarket_user_ws = config.endpoints.polymarket_user_ws.clone();
 
     checks.push(check_http_endpoint(
         "polymarket gamma",
@@ -147,6 +148,14 @@ pub async fn run(config: &Config) -> Result<PreflightReport> {
         true,
         timeout,
     ));
+    if let Some(user_ws) = polymarket_user_ws {
+        checks.push(check_websocket_endpoint(
+            "polymarket user ws",
+            user_ws,
+            true,
+            timeout,
+        ));
+    }
 
     if let Some(check) = build_allora_check(config, allora_client)? {
         checks.push(check);

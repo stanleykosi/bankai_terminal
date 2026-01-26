@@ -11,7 +11,7 @@
  * - ClobAuth signatures follow the Polymarket CLOB auth domain specification.
  */
 use ethers_core::types::transaction::eip712::TypedData;
-use ethers_core::types::{Address, Signature};
+use ethers_core::types::{Address, Signature, U256};
 use ethers_signers::{LocalWallet, Signer};
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::json;
@@ -23,6 +23,24 @@ use crate::security::Secrets;
 const CLOB_AUTH_MESSAGE: &str = "This message attests that I control the given wallet";
 const CLOB_AUTH_DOMAIN_NAME: &str = "ClobAuthDomain";
 const CLOB_AUTH_DOMAIN_VERSION: &str = "1";
+const CTF_EXCHANGE_DOMAIN_NAME: &str = "Polymarket CTF Exchange";
+const CTF_EXCHANGE_DOMAIN_VERSION: &str = "1";
+
+#[derive(Debug, Clone)]
+pub struct OrderSignaturePayload {
+    pub salt: U256,
+    pub maker: Address,
+    pub signer: Address,
+    pub taker: Address,
+    pub token_id: U256,
+    pub maker_amount: U256,
+    pub taker_amount: U256,
+    pub expiration: U256,
+    pub nonce: U256,
+    pub fee_rate_bps: u64,
+    pub side: u8,
+    pub signature_type: u8,
+}
 
 #[derive(Debug, Clone)]
 pub struct Eip712Signer {
@@ -81,6 +99,20 @@ impl Eip712Signer {
         let typed_data = self.clob_auth_typed_data(timestamp, nonce)?;
         self.sign_typed_data(&typed_data).await
     }
+
+    pub fn order_typed_data(
+        &self,
+        order: &OrderSignaturePayload,
+        verifying_contract: Address,
+    ) -> Result<TypedData> {
+        build_order_typed_data(
+            order,
+            verifying_contract,
+            self.chain_id,
+            CTF_EXCHANGE_DOMAIN_NAME,
+            CTF_EXCHANGE_DOMAIN_VERSION,
+        )
+    }
 }
 
 fn build_clob_auth_typed_data(
@@ -120,6 +152,62 @@ fn build_clob_auth_typed_data(
             "timestamp": timestamp,
             "nonce": nonce,
             "message": CLOB_AUTH_MESSAGE
+        }
+    });
+
+    Ok(serde_json::from_value(typed_data_value)?)
+}
+
+fn build_order_typed_data(
+    order: &OrderSignaturePayload,
+    verifying_contract: Address,
+    chain_id: u64,
+    name: &str,
+    version: &str,
+) -> Result<TypedData> {
+    let typed_data_value = json!({
+        "types": {
+            "EIP712Domain": [
+                { "name": "name", "type": "string" },
+                { "name": "version", "type": "string" },
+                { "name": "chainId", "type": "uint256" },
+                { "name": "verifyingContract", "type": "address" }
+            ],
+            "Order": [
+                { "name": "salt", "type": "uint256" },
+                { "name": "maker", "type": "address" },
+                { "name": "signer", "type": "address" },
+                { "name": "taker", "type": "address" },
+                { "name": "tokenId", "type": "uint256" },
+                { "name": "makerAmount", "type": "uint256" },
+                { "name": "takerAmount", "type": "uint256" },
+                { "name": "expiration", "type": "uint256" },
+                { "name": "nonce", "type": "uint256" },
+                { "name": "feeRateBps", "type": "uint256" },
+                { "name": "side", "type": "uint8" },
+                { "name": "signatureType", "type": "uint8" }
+            ]
+        },
+        "primaryType": "Order",
+        "domain": {
+            "name": name,
+            "version": version,
+            "chainId": chain_id,
+            "verifyingContract": format!("{verifying_contract}")
+        },
+        "message": {
+            "salt": format!("{}", order.salt),
+            "maker": format!("{}", order.maker),
+            "signer": format!("{}", order.signer),
+            "taker": format!("{}", order.taker),
+            "tokenId": format!("{}", order.token_id),
+            "makerAmount": format!("{}", order.maker_amount),
+            "takerAmount": format!("{}", order.taker_amount),
+            "expiration": format!("{}", order.expiration),
+            "nonce": format!("{}", order.nonce),
+            "feeRateBps": format!("{}", order.fee_rate_bps),
+            "side": order.side,
+            "signatureType": order.signature_type
         }
     });
 

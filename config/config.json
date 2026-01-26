@@ -12,6 +12,7 @@
   "endpoints": {
     "binance_ws": "wss://stream.binance.com:9443/ws",
     "polymarket_ws": "wss://ws-subscriptions-clob.polymarket.com/ws/market",
+    "polymarket_user_ws": "wss://ws-subscriptions-clob.polymarket.com/ws/user",
     "polymarket_gamma": "https://gamma-api.polymarket.com",
     "allora_rpc": "https://allora-rpc.testnet.allora.network",
     "relayer_http": "https://clob.polymarket.com",
@@ -31,6 +32,27 @@
   "fees": {
     "taker_fee_bps": 300.0,
     "estimated_gas_bps": 20.0
+  },
+  "execution": {
+    "enable_trading": false,
+    "min_order_usdc": 5.0,
+    "max_order_usdc": 50.0,
+    "default_order_usdc": 10.0,
+    "max_slippage_bps": 50.0,
+    "max_impact_bps": 100.0,
+    "probability_scale": 1.0,
+    "probability_max_offset": 0.35,
+    "min_volatility": 0.001,
+    "staleness_max_ratio": 0.05,
+    "order_expiry_secs": 90,
+    "order_cooldown_secs": 5,
+    "allowance_target_usdc": 1000.0,
+    "allowance_check_interval_secs": 600,
+    "trade_reconcile_interval_secs": 10,
+    "take_profit_bps": 150.0,
+    "stop_loss_bps": 200.0,
+    "trailing_stop_bps": 120.0,
+    "close_fraction": 1.0
   },
   "polymarket": {
     "asset_ids": [],

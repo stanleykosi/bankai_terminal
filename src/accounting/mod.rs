@@ -10,4 +10,8 @@ pub mod recovery;
  * - Redemption handles post-resolution capital recycling.
  * - Recovery rehydrates balances and open orders on startup.
  */
+pub mod pnl;
+pub mod keys;
+pub mod trade_events;
+pub mod reconcile;
 pub mod redemption;

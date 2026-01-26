@@ -9,7 +9,7 @@
  * - Enforces snipe guard: edge must clear taker fees + gas + 2%.
  */
 use crate::config::{FeeConfig, StrategyConfig};
-use crate::engine::types::{MarketWindow, TradeIntent, TradeMode};
+use crate::engine::types::{MarketWindow, TradeIntent, TradeMode, TradeSide};
 use crate::error::{BankaiError, Result};
 use crate::storage::redis::RedisManager;
 
@@ -82,6 +82,7 @@ pub fn analyze_opportunity(
         TradeDecision::Ladder | TradeDecision::Snipe => Some(TradeIntent {
             market_id: input.market_id,
             asset_id: input.asset_id,
+            side: TradeSide::Buy,
             mode: match decision {
                 TradeDecision::Snipe => TradeMode::Snipe,
                 _ => TradeMode::Ladder,
@@ -93,6 +94,7 @@ pub fn analyze_opportunity(
             spread_offset_bps: strategy.spread_offset_bps,
             timestamp_ms: input.timestamp_ms,
             market_window: input.market_window,
+            requested_size: None,
         }),
         TradeDecision::NoEdge | TradeDecision::OutOfWindow => None,
     };

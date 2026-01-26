@@ -28,6 +28,8 @@ pub struct Config {
     pub strategy: StrategyConfig,
     pub fees: FeeConfig,
     #[serde(default)]
+    pub execution: ExecutionConfig,
+    #[serde(default)]
     pub polymarket: PolymarketConfig,
     #[serde(default)]
     pub health: HealthConfig,
@@ -41,6 +43,8 @@ pub struct Config {
 pub struct EndpointConfig {
     pub binance_ws: String,
     pub polymarket_ws: String,
+    #[serde(default)]
+    pub polymarket_user_ws: Option<String>,
     pub polymarket_gamma: String,
     pub allora_rpc: String,
     pub relayer_http: String,
@@ -83,6 +87,74 @@ struct StrategyOverrideWrapper {
 pub struct FeeConfig {
     pub taker_fee_bps: f64,
     pub estimated_gas_bps: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExecutionConfig {
+    #[serde(default = "default_execution_enabled")]
+    pub enable_trading: bool,
+    #[serde(default = "default_execution_min_order_usdc")]
+    pub min_order_usdc: f64,
+    #[serde(default = "default_execution_max_order_usdc")]
+    pub max_order_usdc: f64,
+    #[serde(default = "default_execution_default_order_usdc")]
+    pub default_order_usdc: f64,
+    #[serde(default = "default_execution_max_slippage_bps")]
+    pub max_slippage_bps: f64,
+    #[serde(default = "default_execution_max_impact_bps")]
+    pub max_impact_bps: f64,
+    #[serde(default = "default_execution_probability_scale")]
+    pub probability_scale: f64,
+    #[serde(default = "default_execution_probability_max_offset")]
+    pub probability_max_offset: f64,
+    #[serde(default = "default_execution_min_volatility")]
+    pub min_volatility: f64,
+    #[serde(default = "default_execution_staleness_max_ratio")]
+    pub staleness_max_ratio: f64,
+    #[serde(default = "default_execution_order_expiry_secs")]
+    pub order_expiry_secs: u64,
+    #[serde(default = "default_execution_order_cooldown_secs")]
+    pub order_cooldown_secs: u64,
+    #[serde(default = "default_execution_allowance_target_usdc")]
+    pub allowance_target_usdc: f64,
+    #[serde(default = "default_execution_allowance_check_interval_secs")]
+    pub allowance_check_interval_secs: u64,
+    #[serde(default = "default_execution_trade_reconcile_interval_secs")]
+    pub trade_reconcile_interval_secs: u64,
+    #[serde(default = "default_execution_take_profit_bps")]
+    pub take_profit_bps: f64,
+    #[serde(default = "default_execution_stop_loss_bps")]
+    pub stop_loss_bps: f64,
+    #[serde(default = "default_execution_trailing_stop_bps")]
+    pub trailing_stop_bps: f64,
+    #[serde(default = "default_execution_close_fraction")]
+    pub close_fraction: f64,
+}
+
+impl Default for ExecutionConfig {
+    fn default() -> Self {
+        Self {
+            enable_trading: default_execution_enabled(),
+            min_order_usdc: default_execution_min_order_usdc(),
+            max_order_usdc: default_execution_max_order_usdc(),
+            default_order_usdc: default_execution_default_order_usdc(),
+            max_slippage_bps: default_execution_max_slippage_bps(),
+            max_impact_bps: default_execution_max_impact_bps(),
+            probability_scale: default_execution_probability_scale(),
+            probability_max_offset: default_execution_probability_max_offset(),
+            min_volatility: default_execution_min_volatility(),
+            staleness_max_ratio: default_execution_staleness_max_ratio(),
+            order_expiry_secs: default_execution_order_expiry_secs(),
+            order_cooldown_secs: default_execution_order_cooldown_secs(),
+            allowance_target_usdc: default_execution_allowance_target_usdc(),
+            allowance_check_interval_secs: default_execution_allowance_check_interval_secs(),
+            trade_reconcile_interval_secs: default_execution_trade_reconcile_interval_secs(),
+            take_profit_bps: default_execution_take_profit_bps(),
+            stop_loss_bps: default_execution_stop_loss_bps(),
+            trailing_stop_bps: default_execution_trailing_stop_bps(),
+            close_fraction: default_execution_close_fraction(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -207,6 +279,82 @@ fn default_polymarket_reconnect_delay_secs() -> u64 {
 
 fn default_polymarket_snapshot_timeout_ms() -> u64 {
     10_000
+}
+
+fn default_execution_enabled() -> bool {
+    false
+}
+
+fn default_execution_min_order_usdc() -> f64 {
+    5.0
+}
+
+fn default_execution_max_order_usdc() -> f64 {
+    50.0
+}
+
+fn default_execution_default_order_usdc() -> f64 {
+    10.0
+}
+
+fn default_execution_max_slippage_bps() -> f64 {
+    50.0
+}
+
+fn default_execution_max_impact_bps() -> f64 {
+    100.0
+}
+
+fn default_execution_probability_scale() -> f64 {
+    1.0
+}
+
+fn default_execution_probability_max_offset() -> f64 {
+    0.35
+}
+
+fn default_execution_min_volatility() -> f64 {
+    0.001
+}
+
+fn default_execution_staleness_max_ratio() -> f64 {
+    0.05
+}
+
+fn default_execution_order_expiry_secs() -> u64 {
+    90
+}
+
+fn default_execution_order_cooldown_secs() -> u64 {
+    5
+}
+
+fn default_execution_allowance_target_usdc() -> f64 {
+    1000.0
+}
+
+fn default_execution_allowance_check_interval_secs() -> u64 {
+    600
+}
+
+fn default_execution_trade_reconcile_interval_secs() -> u64 {
+    10
+}
+
+fn default_execution_take_profit_bps() -> f64 {
+    150.0
+}
+
+fn default_execution_stop_loss_bps() -> f64 {
+    200.0
+}
+
+fn default_execution_trailing_stop_bps() -> f64 {
+    120.0
+}
+
+fn default_execution_close_fraction() -> f64 {
+    1.0
 }
 
 pub struct ConfigManager {

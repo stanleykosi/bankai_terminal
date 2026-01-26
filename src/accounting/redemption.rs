@@ -282,6 +282,63 @@ impl PositionResolver for NoopPositionResolver {
     }
 }
 
+/// Resolves positions from Redis market metadata and tracked balances.
+pub struct RedisPositionResolver {
+    redis: RedisManager,
+    wallet_key: String,
+}
+
+impl RedisPositionResolver {
+    pub fn new(redis: RedisManager, wallet_key: String) -> Self {
+        Self { redis, wallet_key }
+    }
+}
+
+impl PositionResolver for RedisPositionResolver {
+    fn resolve_targets(
+        &self,
+        condition_id: H256,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<RedemptionTarget>>> + Send>> {
+        let redis = self.redis.clone();
+        let wallet_key = self.wallet_key.clone();
+        Box::pin(async move {
+            let mut outcome_tokens = None;
+            for candidate in condition_id_candidates(condition_id) {
+                let metadata = redis.get_market_metadata(&candidate).await?;
+                if let (Some(up), Some(down)) =
+                    (metadata.outcome_up_token_id, metadata.outcome_down_token_id)
+                {
+                    outcome_tokens = Some((up, down));
+                    break;
+                }
+            }
+            let Some((up_token, down_token)) = outcome_tokens else {
+                return Ok(Vec::new());
+            };
+
+            let up_balance = resolve_position_balance(&redis, &wallet_key, &up_token).await?;
+            let down_balance = resolve_position_balance(&redis, &wallet_key, &down_token).await?;
+            if up_balance <= 0.0 && down_balance <= 0.0 {
+                return Ok(Vec::new());
+            }
+
+            let mut index_sets = Vec::new();
+            if up_balance > 0.0 {
+                index_sets.push(U256::from(1u64));
+            }
+            if down_balance > 0.0 {
+                index_sets.push(U256::from(2u64));
+            }
+            if index_sets.is_empty() {
+                return Ok(Vec::new());
+            }
+
+            let target = RedemptionTarget::new(index_sets)?;
+            Ok(vec![target])
+        })
+    }
+}
+
 /// Redemption transaction metadata after confirmation.
 #[derive(Debug, Clone)]
 pub struct RedemptionOutcome {
@@ -1289,4 +1346,39 @@ fn scale_u256(value: U256, decimals: u32) -> Result<f64> {
     scaled
         .parse::<f64>()
         .map_err(|_| BankaiError::InvalidArgument("failed to parse scaled balance".to_string()))
+}
+
+fn condition_id_candidates(condition_id: H256) -> Vec<String> {
+    let mut candidates = Vec::new();
+    let debug = format!("{condition_id:?}").to_ascii_lowercase();
+    let display = format!("{condition_id}").to_ascii_lowercase();
+    if !debug.is_empty() {
+        candidates.push(debug.clone());
+    }
+    if !display.is_empty() && display != debug {
+        candidates.push(display.clone());
+    }
+    if debug.starts_with("0x") {
+        candidates.push(debug.trim_start_matches("0x").to_string());
+    }
+    if display.starts_with("0x") && display != debug {
+        candidates.push(display.trim_start_matches("0x").to_string());
+    }
+    candidates
+}
+
+async fn resolve_position_balance(
+    redis: &RedisManager,
+    wallet_key: &str,
+    token_id: &str,
+) -> Result<f64> {
+    let tracked = redis.get_tracked_position(wallet_key, token_id).await?;
+    if tracked > 0.0 {
+        return Ok(tracked);
+    }
+    let onchain_key = format!("positions:ctf:{wallet_key}");
+    Ok(redis
+        .hget_float(&onchain_key, token_id)
+        .await?
+        .unwrap_or(0.0))
 }

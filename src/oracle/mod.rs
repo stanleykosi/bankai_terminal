@@ -12,3 +12,4 @@ pub mod allora;
 pub mod binance;
 pub mod polymarket_discovery;
 pub mod polymarket_rtds;
+pub mod polymarket_user_ws;

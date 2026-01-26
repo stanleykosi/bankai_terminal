@@ -15,8 +15,8 @@ use ratatui::widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table};
 use ratatui::Frame;
 
 use super::{
-    FinancialPanelData, HealthPanelData, MarketMode, MarketRow, PolymarketPanelData, StatusBarData,
-    UiSnapshot, ActiveWindowRow,
+    ActiveWindowRow, FinancialPanelData, HealthPanelData, MarketMode, MarketRow,
+    PolymarketPanelData, StatusBarData, UiSnapshot,
 };
 use crate::engine::risk::HaltReason;
 
@@ -30,12 +30,12 @@ pub fn render_dashboard(frame: &mut Frame, snapshot: &UiSnapshot) {
 
     let body = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
         .split(layout[1]);
 
     let left = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
         .split(body[0]);
     render_markets(frame, left[0], &snapshot.markets);
     render_activity_log(frame, left[1], &snapshot.activity_log);
@@ -43,17 +43,23 @@ pub fn render_dashboard(frame: &mut Frame, snapshot: &UiSnapshot) {
     let right = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage(30),
-            Constraint::Percentage(20),
-            Constraint::Percentage(30),
-            Constraint::Percentage(20),
+            Constraint::Percentage(22),
+            Constraint::Percentage(18),
+            Constraint::Percentage(26),
+            Constraint::Percentage(34),
         ])
         .split(body[1]);
 
-    render_health(frame, right[0], &snapshot.health);
+    let top = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(right[0]);
+
+    render_health(frame, top[0], &snapshot.health);
+    render_financials(frame, top[1], &snapshot.financials);
     render_polymarket(frame, right[1], &snapshot.polymarket);
     render_active_windows(frame, right[2], &snapshot.active_windows);
-    render_financials(frame, right[3], &snapshot.financials);
+    render_pipeline(frame, right[3], snapshot);
 }
 
 fn render_status_bar(frame: &mut Frame, area: Rect, status: &StatusBarData) {
@@ -397,6 +403,108 @@ fn render_active_windows(frame: &mut Frame, area: Rect, windows: &[ActiveWindowR
     .column_spacing(1);
 
     frame.render_widget(table, area);
+}
+
+fn render_pipeline(frame: &mut Frame, area: Rect, snapshot: &UiSnapshot) {
+    let label_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+
+    let mut lines: Vec<Line> = Vec::new();
+    let assets = snapshot
+        .polymarket
+        .asset_count
+        .map(|count| count.to_string())
+        .unwrap_or_else(|| "--".to_string());
+    let refresh = snapshot
+        .polymarket
+        .last_refresh
+        .map(|age| format!("{}s", age.as_secs()))
+        .unwrap_or_else(|| "--".to_string());
+
+    lines.push(Line::from(Span::styled("Discovery", label_style)));
+    lines.push(Line::from(format!("  assets={} refresh={}", assets, refresh)));
+    lines.push(Line::from(""));
+
+    lines.push(Line::from(Span::styled("Windows", label_style)));
+    if snapshot.active_windows.is_empty() {
+        lines.push(Line::from("  --"));
+    } else {
+        for row in snapshot.active_windows.iter() {
+            let status_style = match row.status.as_str() {
+                "ACTIVE" => Style::default().fg(Color::Green),
+                "UPCOMING" => Style::default().fg(Color::Yellow),
+                "PAST" => Style::default().fg(Color::DarkGray),
+                _ => Style::default().fg(Color::DarkGray),
+            };
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(format!("{:>3}", row.asset), Style::default().fg(Color::White)),
+                Span::raw(" "),
+                Span::styled(format!("{:<8}", row.status), status_style),
+                Span::raw(" "),
+                Span::raw(row.window_et.clone()),
+            ]));
+        }
+    }
+    lines.push(Line::from(""));
+
+    lines.push(Line::from(Span::styled("Intent", label_style)));
+    if snapshot.intent_log.is_empty() {
+        lines.push(Line::from("  --"));
+    } else {
+        for entry in snapshot.intent_log.iter().take(2) {
+            lines.push(Line::from(format!("  {entry}")));
+        }
+    }
+    lines.push(Line::from(""));
+
+    lines.push(Line::from(Span::styled("Order", label_style)));
+    if snapshot.order_log.is_empty() {
+        lines.push(Line::from("  --"));
+    } else {
+        for entry in snapshot.order_log.iter().take(2) {
+            lines.push(Line::from(format!("  {entry}")));
+        }
+    }
+
+    let trade_line = snapshot
+        .order_log
+        .iter()
+        .find(|entry| entry.contains("[TRADE]"))
+        .cloned();
+    let alert_line = snapshot
+        .activity_log
+        .iter()
+        .find(|entry| entry.contains("[ALERT]"))
+        .cloned();
+    if trade_line.is_some() || alert_line.is_some() {
+        lines.push(Line::from(""));
+    }
+    if let Some(trade) = trade_line {
+        lines.push(Line::from(Span::styled("Trade", label_style)));
+        lines.push(Line::from(format!("  {trade}")));
+    }
+    if let Some(alert) = alert_line {
+        lines.push(Line::from(Span::styled("Alert", label_style)));
+        lines.push(Line::from(format!("  {alert}")));
+    }
+
+    let block = Block::default()
+        .title(Span::styled(
+            " Execution Pipeline ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .style(Style::default().fg(Color::Cyan));
+
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .alignment(Alignment::Left);
+    frame.render_widget(paragraph, area);
 }
 
 fn format_duration(duration: std::time::Duration) -> String {

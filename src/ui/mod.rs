@@ -24,6 +24,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
 
+use crate::accounting::keys::PNL_24H_KEY;
 use crate::config::Config;
 use crate::engine::analysis::snipe_threshold_bps;
 use crate::engine::risk::{HaltReason, RiskState};
@@ -41,6 +42,8 @@ const DEFAULT_REFRESH_MS: u64 = 250;
 const DEFAULT_BANKROLL_REFRESH_MS: u64 = 2_000;
 const DEFAULT_POLYMARKET_REFRESH_MS: u64 = 5_000;
 const DEFAULT_ACTIVITY_LOG_LIMIT: usize = 8;
+const DEFAULT_INTENT_LOG_LIMIT: usize = 6;
+const DEFAULT_ORDER_LOG_LIMIT: usize = 6;
 const POLYMARKET_STALE_MS: u64 = 120_000;
 const ORACLE_ONLINE_MULTIPLIER: u64 = 3;
 
@@ -146,6 +149,8 @@ pub struct UiSnapshot {
     pub polymarket: PolymarketPanelData,
     pub markets: Vec<MarketRow>,
     pub activity_log: Vec<String>,
+    pub intent_log: Vec<String>,
+    pub order_log: Vec<String>,
     pub active_windows: Vec<ActiveWindowRow>,
 }
 
@@ -266,10 +271,12 @@ async fn snapshot_loop(
     let mut polymarket_interval = tokio::time::interval(ui_config.polymarket_interval);
     let start_time = Instant::now();
     let mut bankroll_usdc: Option<f64> = None;
-    let pnl_24h: Option<f64> = None;
+    let mut pnl_24h: Option<f64> = None;
     let mut polymarket_asset_count: Option<usize> = None;
     let mut polymarket_last_refresh: Option<Instant> = None;
     let mut activity_log: Vec<String> = Vec::new();
+    let mut intent_log: Vec<String> = Vec::new();
+    let mut order_log: Vec<String> = Vec::new();
     let mut binance_window_anchor = false;
     let mut active_windows: Vec<ActiveWindowRow> = Vec::new();
 
@@ -303,6 +310,10 @@ async fn snapshot_loop(
                         Ok(value) => bankroll_usdc = value,
                         Err(error) => tracing::warn!(?error, "failed to read bankroll from redis"),
                     }
+                    match redis.get_float(PNL_24H_KEY).await {
+                        Ok(value) => pnl_24h = value,
+                        Err(error) => tracing::warn!(?error, "failed to read pnl from redis"),
+                    }
                 }
             }
             _ = polymarket_interval.tick() => {
@@ -325,6 +336,14 @@ async fn snapshot_loop(
                         Ok(entries) => activity_log = entries,
                         Err(error) => tracing::warn!(?error, "failed to read activity log from redis"),
                     }
+                    match redis.get_intent_log(DEFAULT_INTENT_LOG_LIMIT).await {
+                        Ok(entries) => intent_log = entries,
+                        Err(error) => tracing::warn!(?error, "failed to read intent log from redis"),
+                    }
+                    match redis.get_order_log(DEFAULT_ORDER_LOG_LIMIT).await {
+                        Ok(entries) => order_log = entries,
+                        Err(error) => tracing::warn!(?error, "failed to read order log from redis"),
+                    }
                 }
             }
             _ = refresh.tick() => {
@@ -339,6 +358,8 @@ async fn snapshot_loop(
                     polymarket_last_refresh,
                     ui_config.market_limit,
                     activity_log.clone(),
+                    intent_log.clone(),
+                    order_log.clone(),
                     binance_window_anchor,
                     active_windows.clone(),
                 );
@@ -363,6 +384,8 @@ fn build_snapshot(
     polymarket_last_refresh: Option<Instant>,
     market_limit: usize,
     activity_log: Vec<String>,
+    intent_log: Vec<String>,
+    order_log: Vec<String>,
     binance_window_anchor: bool,
     active_windows: Vec<ActiveWindowRow>,
 ) -> UiSnapshot {
@@ -430,6 +453,8 @@ fn build_snapshot(
         polymarket: polymarket_panel,
         markets,
         activity_log,
+        intent_log,
+        order_log,
         active_windows,
     }
 }
@@ -541,6 +566,8 @@ fn ui_loop(receiver: mpsc::Receiver<UiCommand>, config: TuiConfig) -> UiResult<(
         },
         markets: Vec::new(),
         activity_log: Vec::new(),
+        intent_log: Vec::new(),
+        order_log: Vec::new(),
         active_windows: Vec::new(),
     };
 

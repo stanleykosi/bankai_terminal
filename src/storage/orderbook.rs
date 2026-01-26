@@ -26,7 +26,14 @@ pub struct OrderBookLevel {
     pub size: f64,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
+pub struct VwapQuote {
+    pub avg_price: f64,
+    pub filled_size: f64,
+    pub notional: f64,
+}
+
+#[derive(Clone, Debug)]
 pub struct OrderBookStore {
     redis: RedisManager,
 }
@@ -92,6 +99,117 @@ impl OrderBookStore {
         self.redis.zadd(&zset_key, score, price).await?;
         self.redis.hset_float(&depth_key, price, size).await?;
         Ok(())
+    }
+
+    pub async fn best_level(
+        &self,
+        token_id: &str,
+        side: BookSide,
+    ) -> Result<Option<OrderBookLevel>> {
+        let mut levels = self.top_levels(token_id, side, 1).await?;
+        Ok(levels.pop())
+    }
+
+    pub async fn top_levels(
+        &self,
+        token_id: &str,
+        side: BookSide,
+        limit: usize,
+    ) -> Result<Vec<OrderBookLevel>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let key = match side {
+            BookSide::Bid => bids_key(token_id),
+            BookSide::Ask => asks_key(token_id),
+        };
+        let depth_key = depth_key(token_id);
+        let entries = match side {
+            BookSide::Bid => {
+                self.redis
+                    .zrevrange_with_scores(&key, 0, (limit - 1) as isize)
+                    .await?
+            }
+            BookSide::Ask => {
+                self.redis
+                    .zrange_with_scores(&key, 0, (limit - 1) as isize)
+                    .await?
+            }
+        };
+        let mut levels = Vec::new();
+        for (price, _) in entries {
+            if let Some(size) = self.redis.hget_float(&depth_key, &price).await? {
+                if size > 0.0 {
+                    levels.push(OrderBookLevel { price, size });
+                }
+            }
+        }
+        Ok(levels)
+    }
+
+    pub async fn mid_price(&self, token_id: &str) -> Result<Option<f64>> {
+        let bid = self.best_level(token_id, BookSide::Bid).await?;
+        let ask = self.best_level(token_id, BookSide::Ask).await?;
+        match (bid, ask) {
+            (Some(bid), Some(ask)) => {
+                let bid = bid.price.parse::<f64>().ok();
+                let ask = ask.price.parse::<f64>().ok();
+                match (bid, ask) {
+                    (Some(bid), Some(ask)) if bid > 0.0 && ask > 0.0 => {
+                        Ok(Some((bid + ask) / 2.0))
+                    }
+                    _ => Ok(None),
+                }
+            }
+            _ => Ok(None),
+        }
+    }
+
+    pub async fn vwap_for_size(
+        &self,
+        token_id: &str,
+        side: BookSide,
+        size: f64,
+        level_limit: usize,
+    ) -> Result<Option<VwapQuote>> {
+        if size <= 0.0 {
+            return Ok(None);
+        }
+        let levels = self.top_levels(token_id, side, level_limit).await?;
+        if levels.is_empty() {
+            return Ok(None);
+        }
+        let mut remaining = size;
+        let mut notional = 0.0;
+        let mut filled = 0.0;
+        for level in levels {
+            if remaining <= 0.0 {
+                break;
+            }
+            let price = match level.price.parse::<f64>() {
+                Ok(value) if value > 0.0 => value,
+                _ => continue,
+            };
+            let take = remaining.min(level.size);
+            if take <= 0.0 {
+                continue;
+            }
+            notional += take * price;
+            filled += take;
+            remaining -= take;
+        }
+        if filled <= 0.0 {
+            return Ok(None);
+        }
+        let avg_price = notional / filled;
+        if filled + 1e-9 < size {
+            return Ok(None);
+        }
+        Ok(Some(VwapQuote {
+            avg_price,
+            filled_size: filled,
+            notional,
+        }))
     }
 }
 

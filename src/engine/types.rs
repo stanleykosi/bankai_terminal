@@ -20,6 +20,12 @@ pub enum TradeMode {
     Snipe,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TradeSide {
+    Buy,
+    Sell,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct MarketWindow {
     pub start_time_ms: u64,
@@ -30,6 +36,7 @@ pub struct MarketWindow {
 pub struct TradeIntent {
     pub market_id: String,
     pub asset_id: String,
+    pub side: TradeSide,
     pub mode: TradeMode,
     pub implied_prob: f64,
     pub true_prob: f64,
@@ -38,6 +45,7 @@ pub struct TradeIntent {
     pub spread_offset_bps: f64,
     pub timestamp_ms: u64,
     pub market_window: Option<MarketWindow>,
+    pub requested_size: Option<f64>,
 }
 
 #[derive(Debug, Clone)]

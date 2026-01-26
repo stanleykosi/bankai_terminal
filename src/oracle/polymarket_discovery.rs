@@ -22,7 +22,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::engine::types::MarketWindow;
 use crate::error::Result;
-use crate::storage::redis::RedisManager;
+use crate::storage::redis::{OutcomeTokenIds, RedisManager};
 
 const DEFAULT_LIMIT: usize = 200;
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(30);
@@ -119,13 +119,18 @@ impl PolymarketDiscovery {
                         if let Some(metadata) =
                             extract_market_metadata(market, self.config.min_liquidity, &time_window)
                         {
+                            let Some(outcome_tokens) = extract_outcome_tokens(market) else {
+                                continue;
+                            };
                             self.redis
                                 .set_market_metadata(
                                     &metadata.market_id,
                                     metadata.fee_rate_bps,
                                     metadata.min_tick_size,
+                                    metadata.min_order_size,
                                     metadata.start_time_ms,
                                     metadata.end_time_ms,
+                                    Some(&outcome_tokens),
                                 )
                                 .await?;
                             accepted += 1;
@@ -137,7 +142,7 @@ impl PolymarketDiscovery {
                                     window: time_window,
                                     market_id: metadata.market_id.clone(),
                                     label: label.clone(),
-                                    asset_ids: extract_market_asset_ids(market),
+                                    asset_ids: vec![outcome_tokens.up, outcome_tokens.down],
                                 });
                             self.log_market_if_new(
                                 &metadata.market_id,
@@ -277,6 +282,7 @@ struct MarketMetadata {
     market_id: String,
     fee_rate_bps: f64,
     min_tick_size: f64,
+    min_order_size: Option<f64>,
     start_time_ms: u64,
     end_time_ms: u64,
 }
@@ -327,11 +333,13 @@ fn extract_market_metadata(
     }
     let fee_rate_bps = parse_fee_rate_bps(market).unwrap_or(0.0);
     let min_tick_size = parse_min_tick_size(market).unwrap_or(0.001);
+    let min_order_size = parse_min_order_size(market);
 
     Some(MarketMetadata {
         market_id,
         fee_rate_bps,
         min_tick_size,
+        min_order_size,
         start_time_ms: time_window.start_time_ms,
         end_time_ms: time_window.end_time_ms,
     })
@@ -697,6 +705,23 @@ fn parse_min_tick_size(market: &Value) -> Option<f64> {
     None
 }
 
+fn parse_min_order_size(market: &Value) -> Option<f64> {
+    let candidates = [
+        "orderMinSize",
+        "order_min_size",
+        "minOrderSize",
+        "min_order_size",
+    ];
+    for key in candidates {
+        if let Some(value) = market.get(key) {
+            if let Some(parsed) = parse_numeric(value) {
+                return Some(parsed);
+            }
+        }
+    }
+    None
+}
+
 fn is_augmented_negative_risk(market: &Value) -> bool {
     if market
         .get("negRiskOther")
@@ -753,7 +778,21 @@ fn parse_numeric(value: &Value) -> Option<f64> {
     None
 }
 
-fn extract_market_asset_ids(market: &Value) -> Vec<String> {
+fn extract_outcome_tokens(market: &Value) -> Option<OutcomeTokenIds> {
+    if !has_valid_outcomes(market) {
+        return None;
+    }
+    let token_ids = extract_ordered_token_ids(market)?;
+    if token_ids.len() < 2 {
+        return None;
+    }
+    Some(OutcomeTokenIds {
+        up: token_ids[0].clone(),
+        down: token_ids[1].clone(),
+    })
+}
+
+fn extract_ordered_token_ids(market: &Value) -> Option<Vec<String>> {
     let candidates = [
         "clobTokenIds",
         "clob_token_ids",
@@ -762,13 +801,16 @@ fn extract_market_asset_ids(market: &Value) -> Vec<String> {
         "assetIds",
         "asset_ids",
     ];
-    let mut ids = Vec::new();
     for key in candidates {
         if let Some(value) = market.get(key) {
+            let mut ids = Vec::new();
             parse_token_field(value, &mut ids);
+            if !ids.is_empty() {
+                return Some(ids);
+            }
         }
     }
-    ids
+    None
 }
 
 fn parse_token_field(value: &Value, output: &mut Vec<String>) {

@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 
-use crate::engine::types::{TradeIntent, TradeMode};
+use crate::engine::types::{TradeIntent, TradeMode, TradeSide};
 use crate::error::{BankaiError, Result};
 use crate::execution::direct::{DirectExecutionClient, DirectExecutionResult, FillOrdersRequest};
 use crate::execution::nonce::NonceManager;
@@ -25,9 +25,13 @@ use crate::execution::relayer::{
     RelayerAuth, RelayerClient, RelayerError, RelayerErrorKind, RelayerResponse,
 };
 use crate::storage::database::{DatabaseManager, TradeExecutionLog};
+use crate::storage::redis::RedisManager;
 use crate::telemetry::metrics;
+use chrono::Utc;
+use chrono_tz::America::New_York;
 
 const DEFAULT_RELAYER_TIMEOUT_MS: u64 = 500;
+const ORDER_LOG_LIMIT: usize = 20;
 
 #[derive(Debug, Clone)]
 pub struct ExecutionOrchestratorConfig {
@@ -46,13 +50,14 @@ impl Default for ExecutionOrchestratorConfig {
 pub struct ExecutionPayloads {
     pub relayer_payload: Value,
     pub relayer_auth: Option<RelayerAuth>,
-    pub direct_request: FillOrdersRequest,
+    pub direct_request: Option<FillOrdersRequest>,
     pub fees_paid: f64,
     pub metadata: Option<Value>,
 }
 
+#[async_trait::async_trait]
 pub trait ExecutionPayloadBuilder: Send + Sync {
-    fn build_payloads(&self, intent: &TradeIntent) -> Result<ExecutionPayloads>;
+    async fn build_payloads(&self, intent: &TradeIntent) -> Result<ExecutionPayloads>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,9 +89,11 @@ pub struct ExecutionReport {
 pub struct ExecutionOrchestrator {
     config: ExecutionOrchestratorConfig,
     relayer: RelayerClient,
-    direct: DirectExecutionClient,
-    database: DatabaseManager,
+    direct: Option<DirectExecutionClient>,
+    database: Option<DatabaseManager>,
     nonce_manager: Option<NonceManager>,
+    activity_redis: Option<RedisManager>,
+    wallet_key: Option<String>,
     builder: Arc<dyn ExecutionPayloadBuilder>,
 }
 
@@ -94,17 +101,21 @@ impl ExecutionOrchestrator {
     pub fn new(
         config: ExecutionOrchestratorConfig,
         relayer: RelayerClient,
-        direct: DirectExecutionClient,
-        database: DatabaseManager,
+        direct: Option<DirectExecutionClient>,
+        database: Option<DatabaseManager>,
         nonce_manager: Option<NonceManager>,
+        activity_redis: Option<RedisManager>,
+        wallet_key: Option<String>,
         builder: Arc<dyn ExecutionPayloadBuilder>,
     ) -> Result<Self> {
         if let Some(manager) = nonce_manager.as_ref() {
-            let expected = format!("{}", direct.wallet_address()).to_ascii_lowercase();
-            if manager.address() != expected {
-                return Err(BankaiError::InvalidArgument(
-                    "nonce manager address does not match signer".to_string(),
-                ));
+            if let Some(direct) = direct.as_ref() {
+                let expected = format!("{}", direct.wallet_address()).to_ascii_lowercase();
+                if manager.address() != expected {
+                    return Err(BankaiError::InvalidArgument(
+                        "nonce manager address does not match signer".to_string(),
+                    ));
+                }
             }
         }
 
@@ -114,6 +125,8 @@ impl ExecutionOrchestrator {
             direct,
             database,
             nonce_manager,
+            activity_redis,
+            wallet_key,
             builder,
         })
     }
@@ -143,7 +156,7 @@ impl ExecutionOrchestrator {
             }
         }
 
-        let payloads = self.builder.build_payloads(&intent)?;
+        let payloads = self.builder.build_payloads(&intent).await?;
         let report = self.execute_intent(&intent, &payloads).await?;
         self.persist_report(&intent, &payloads, &report).await?;
 
@@ -153,6 +166,7 @@ impl ExecutionOrchestrator {
                 market_id = %intent.market_id,
                 "execution succeeded"
             );
+            self.update_tracked_position(&intent, &payloads).await;
         } else {
             tracing::warn!(
                 rail = report.rail.as_str(),
@@ -161,6 +175,7 @@ impl ExecutionOrchestrator {
                 "execution failed"
             );
         }
+        self.log_order_event(&intent, &report).await;
         Ok(())
     }
 
@@ -187,35 +202,56 @@ impl ExecutionOrchestrator {
             }
             Err(error) => {
                 metadata.insert("relayer".to_string(), relayer_error_metadata(&error));
-                metrics::increment_rail_failover();
-                let direct_result = self.execute_direct(payloads).await;
+                if error.should_failover() {
+                    if payloads.direct_request.is_some() {
+                        metrics::increment_rail_failover();
+                        let direct_result = self.execute_direct(payloads).await;
 
-                match direct_result {
-                    Ok(result) => {
-                        metadata.insert("direct".to_string(), direct_success_metadata(&result));
-                        Ok(ExecutionReport {
-                            success: true,
-                            rail: ExecutionRail::Direct,
-                            latency_ms: None,
-                            request_id: None,
-                            tx_hash: Some(format!("{:?}", result.tx_hash)),
-                            error: None,
-                            metadata: Value::Object(metadata),
-                        })
-                    }
-                    Err(direct_error) => {
-                        metadata.insert("direct".to_string(), direct_error_metadata(&direct_error));
-                        Ok(ExecutionReport {
-                            success: false,
-                            rail: ExecutionRail::Direct,
-                            latency_ms: None,
-                            request_id: None,
-                            tx_hash: None,
-                            error: Some(direct_error.to_string()),
-                            metadata: Value::Object(metadata),
-                        })
+                        match direct_result {
+                            Ok(result) => {
+                                metadata.insert("direct".to_string(), direct_success_metadata(&result));
+                                return Ok(ExecutionReport {
+                                    success: true,
+                                    rail: ExecutionRail::Direct,
+                                    latency_ms: None,
+                                    request_id: None,
+                                    tx_hash: Some(format!("{:?}", result.tx_hash)),
+                                    error: None,
+                                    metadata: Value::Object(metadata),
+                                });
+                            }
+                            Err(direct_error) => {
+                                metadata.insert(
+                                    "direct".to_string(),
+                                    direct_error_metadata(&direct_error),
+                                );
+                                return Ok(ExecutionReport {
+                                    success: false,
+                                    rail: ExecutionRail::Direct,
+                                    latency_ms: None,
+                                    request_id: None,
+                                    tx_hash: None,
+                                    error: Some(direct_error.to_string()),
+                                    metadata: Value::Object(metadata),
+                                });
+                            }
+                        }
+                    } else {
+                        tracing::warn!(
+                            market_id = %intent.market_id,
+                            "relayer failed but no direct fallback configured"
+                        );
                     }
                 }
+                Ok(ExecutionReport {
+                    success: false,
+                    rail: ExecutionRail::Relayer,
+                    latency_ms: error.latency_ms,
+                    request_id: None,
+                    tx_hash: None,
+                    error: Some(error.message.clone()),
+                    metadata: Value::Object(metadata),
+                })
             }
         }
     }
@@ -241,17 +277,26 @@ impl ExecutionOrchestrator {
     }
 
     async fn execute_direct(&self, payloads: &ExecutionPayloads) -> Result<DirectExecutionResult> {
-        let mut request = payloads.direct_request.clone();
+        let request = payloads.direct_request.clone().ok_or_else(|| {
+            BankaiError::InvalidArgument("direct execution request missing".to_string())
+        })?;
+        let direct = self.direct.as_ref().ok_or_else(|| {
+            BankaiError::InvalidArgument("direct execution client missing".to_string())
+        })?;
+        let mut request = request;
         if let Some(manager) = self.nonce_manager.as_ref() {
             let nonce = self.ensure_reserved_nonce(manager).await?;
             request.options.nonce = Some(nonce.into());
         }
-        self.direct.send_fill_orders(&request).await
+        direct.send_fill_orders(&request).await
     }
 
     async fn ensure_reserved_nonce(&self, manager: &NonceManager) -> Result<u64> {
+        let direct = self.direct.as_ref().ok_or_else(|| {
+            BankaiError::InvalidArgument("direct execution client missing".to_string())
+        })?;
         if manager.get_next_nonce().await?.is_none() {
-            let chain_nonce = self.direct.fetch_chain_nonce().await?;
+            let chain_nonce = direct.fetch_chain_nonce().await?;
             let next_nonce = u256_to_u64(chain_nonce, "chain nonce")?;
             let _ = manager.initialize_if_missing(next_nonce).await?;
         }
@@ -265,18 +310,100 @@ impl ExecutionOrchestrator {
         payloads: &ExecutionPayloads,
         report: &ExecutionReport,
     ) -> Result<()> {
-        let log = TradeExecutionLog {
-            market_id: intent.market_id.clone(),
-            rail: report.rail.as_str().to_string(),
-            mode: trade_mode_label(intent.mode).to_string(),
-            expected_ev: intent.edge,
-            actual_pnl: None,
-            fees_paid: payloads.fees_paid,
-            latency_ms: report.latency_ms,
-            metadata: Some(report.metadata.clone()),
-        };
-        self.database.log_trade_execution(&log).await
+        if let Some(database) = self.database.as_ref() {
+            let log = TradeExecutionLog {
+                market_id: intent.market_id.clone(),
+                rail: report.rail.as_str().to_string(),
+                mode: trade_mode_label(intent.mode).to_string(),
+                expected_ev: intent.edge,
+                actual_pnl: None,
+                fees_paid: payloads.fees_paid,
+                latency_ms: report.latency_ms,
+                metadata: Some(report.metadata.clone()),
+            };
+            database.log_trade_execution(&log).await?;
+        }
+        Ok(())
     }
+}
+
+impl ExecutionOrchestrator {
+    async fn log_order_event(&self, intent: &TradeIntent, report: &ExecutionReport) {
+        let Some(redis) = self.activity_redis.as_ref() else {
+            return;
+        };
+        let prefix = log_prefix();
+        let status = if report.success { "OK" } else { "FAIL" };
+        let message = format!(
+            "{prefix} Order {status} rail={} market={} mode={} edge_bps={:.1}",
+            report.rail.as_str(),
+            intent.market_id,
+            trade_mode_label(intent.mode),
+            intent.edge_bps
+        );
+        let _ = redis.push_order_log(&message, ORDER_LOG_LIMIT).await;
+    }
+
+    async fn update_tracked_position(&self, intent: &TradeIntent, payloads: &ExecutionPayloads) {
+        let Some(redis) = self.activity_redis.as_ref() else {
+            return;
+        };
+        let Some(wallet_key) = self.wallet_key.as_ref() else {
+            return;
+        };
+        let Some(context) = payloads.metadata.as_ref() else {
+            return;
+        };
+        let size = context
+            .get("size")
+            .and_then(|value| value.as_f64())
+            .unwrap_or(0.0);
+        let price = context
+            .get("price")
+            .and_then(|value| value.as_f64())
+            .unwrap_or(0.0);
+        if size <= 0.0 || price <= 0.0 {
+            return;
+        }
+
+        let asset_id = intent.asset_id.as_str();
+        let current = match redis.get_tracked_position(wallet_key, asset_id).await {
+            Ok(value) => value,
+            Err(_) => return,
+        };
+        let mut new_balance = current;
+        match intent.side {
+            TradeSide::Buy => {
+                new_balance += size;
+                if let Ok(entry) = redis.get_entry_price(wallet_key, asset_id).await {
+                    let entry_price = entry.unwrap_or(0.0);
+                    let weighted = if entry_price > 0.0 && current > 0.0 {
+                        ((entry_price * current) + (price * size)) / new_balance
+                    } else {
+                        price
+                    };
+                    let _ = redis.set_entry_price(wallet_key, asset_id, weighted).await;
+                    let _ = redis.set_peak_price(wallet_key, asset_id, price).await;
+                }
+            }
+            TradeSide::Sell => {
+                new_balance = (current - size).max(0.0);
+                if new_balance <= 0.0 {
+                    let _ = redis.set_entry_price(wallet_key, asset_id, 0.0).await;
+                    let _ = redis.set_peak_price(wallet_key, asset_id, 0.0).await;
+                }
+            }
+        }
+        let _ = redis
+            .set_tracked_position(wallet_key, asset_id, new_balance)
+            .await;
+    }
+}
+
+fn log_prefix() -> String {
+    let now = Utc::now();
+    let et = now.with_timezone(&New_York);
+    format!("[{}]", et.format("%H:%M:%S"))
 }
 
 fn base_metadata(intent: &TradeIntent, extra: Option<Value>) -> Map<String, Value> {
@@ -286,6 +413,7 @@ fn base_metadata(intent: &TradeIntent, extra: Option<Value>) -> Map<String, Valu
         json!({
             "market_id": intent.market_id.as_str(),
             "asset_id": intent.asset_id.as_str(),
+            "side": trade_side_label(intent.side),
             "mode": trade_mode_label(intent.mode),
             "implied_prob": intent.implied_prob,
             "true_prob": intent.true_prob,
@@ -299,6 +427,7 @@ fn base_metadata(intent: &TradeIntent, extra: Option<Value>) -> Map<String, Valu
                     "end_time_ms": window.end_time_ms,
                 })
             }),
+            "requested_size": intent.requested_size,
         }),
     );
     if let Some(extra) = extra {
@@ -362,6 +491,13 @@ fn trade_mode_label(mode: TradeMode) -> &'static str {
     match mode {
         TradeMode::Ladder => "LADDER",
         TradeMode::Snipe => "SNIPE",
+    }
+}
+
+fn trade_side_label(side: TradeSide) -> &'static str {
+    match side {
+        TradeSide::Buy => "BUY",
+        TradeSide::Sell => "SELL",
     }
 }
 
