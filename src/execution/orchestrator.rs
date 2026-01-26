@@ -129,6 +129,20 @@ impl ExecutionOrchestrator {
     }
 
     async fn handle_intent(&self, intent: TradeIntent) -> Result<()> {
+        if let Some(window) = intent.market_window {
+            let now = now_ms()?;
+            if !is_within_window(now, window) {
+                tracing::warn!(
+                    market_id = %intent.market_id,
+                    start_time_ms = window.start_time_ms,
+                    end_time_ms = window.end_time_ms,
+                    now_ms = now,
+                    "trade intent outside market window; skipping execution"
+                );
+                return Ok(());
+            }
+        }
+
         let payloads = self.builder.build_payloads(&intent)?;
         let report = self.execute_intent(&intent, &payloads).await?;
         self.persist_report(&intent, &payloads, &report).await?;
@@ -279,6 +293,12 @@ fn base_metadata(intent: &TradeIntent, extra: Option<Value>) -> Map<String, Valu
             "edge_bps": intent.edge_bps,
             "spread_offset_bps": intent.spread_offset_bps,
             "timestamp_ms": intent.timestamp_ms,
+            "market_window": intent.market_window.map(|window| {
+                json!({
+                    "start_time_ms": window.start_time_ms,
+                    "end_time_ms": window.end_time_ms,
+                })
+            }),
         }),
     );
     if let Some(extra) = extra {
@@ -352,6 +372,10 @@ fn duration_to_ms(duration: Duration) -> u64 {
     } else {
         ms as u64
     }
+}
+
+fn is_within_window(timestamp_ms: u64, window: crate::engine::types::MarketWindow) -> bool {
+    timestamp_ms >= window.start_time_ms && timestamp_ms <= window.end_time_ms
 }
 
 fn now_ms() -> Result<u64> {

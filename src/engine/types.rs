@@ -20,6 +20,12 @@ pub enum TradeMode {
     Snipe,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct MarketWindow {
+    pub start_time_ms: u64,
+    pub end_time_ms: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct TradeIntent {
     pub market_id: String,
@@ -31,6 +37,7 @@ pub struct TradeIntent {
     pub edge_bps: f64,
     pub spread_offset_bps: f64,
     pub timestamp_ms: u64,
+    pub market_window: Option<MarketWindow>,
 }
 
 #[derive(Debug, Clone)]

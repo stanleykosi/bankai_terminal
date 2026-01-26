@@ -92,6 +92,14 @@
     - `src/storage/redis.rs`: methods for market metadata.
   - **Step Dependencies**: Step 5
 
+- [X] Step 11b: Polymarket 15m Time Window Parsing
+  - **Task**: Parse 15m title/question ranges, convert ET -> UTC, and store `startTimeMs`/`endTimeMs` in Redis market metadata to gate trading windows.
+  - **Files**:
+    - `src/oracle/polymarket_discovery.rs`: Time-range parsing and validation.
+    - `src/storage/redis.rs`: Store start/end timestamps.
+    - `Cargo.toml`: Time parsing dependencies.
+  - **Step Dependencies**: Step 11
+
 - [X] Step 12: Polymarket RTDS (Order Book)
   - **Task**: Implement `src/oracle/polymarket_rtds.rs`. Connect to `wss://ws-live-data.polymarket.com`. Fetch initial snapshot via REST, then apply `price_change` updates to maintain a local ZSET order book in Redis.
   - **Files**:

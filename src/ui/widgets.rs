@@ -16,7 +16,7 @@ use ratatui::Frame;
 
 use super::{
     FinancialPanelData, HealthPanelData, MarketMode, MarketRow, PolymarketPanelData, StatusBarData,
-    UiSnapshot,
+    UiSnapshot, ActiveWindowRow,
 };
 use crate::engine::risk::HaltReason;
 
@@ -30,23 +30,30 @@ pub fn render_dashboard(frame: &mut Frame, snapshot: &UiSnapshot) {
 
     let body = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(68), Constraint::Percentage(32)])
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
         .split(layout[1]);
 
-    render_markets(frame, body[0], &snapshot.markets);
+    let left = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+        .split(body[0]);
+    render_markets(frame, left[0], &snapshot.markets);
+    render_activity_log(frame, left[1], &snapshot.activity_log);
 
     let right = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage(45),
-            Constraint::Percentage(25),
             Constraint::Percentage(30),
+            Constraint::Percentage(20),
+            Constraint::Percentage(30),
+            Constraint::Percentage(20),
         ])
         .split(body[1]);
 
     render_health(frame, right[0], &snapshot.health);
     render_polymarket(frame, right[1], &snapshot.polymarket);
-    render_financials(frame, right[2], &snapshot.financials);
+    render_active_windows(frame, right[2], &snapshot.active_windows);
+    render_financials(frame, right[3], &snapshot.financials);
 }
 
 fn render_status_bar(frame: &mut Frame, area: Rect, status: &StatusBarData) {
@@ -213,6 +220,10 @@ fn render_health(frame: &mut Frame, area: Rect, health: &HealthPanelData) {
         Line::from(format!("Latency: {} ms", health.latency_ms)),
         Line::from(format!("Clock drift: {} ms", health.clock_drift_ms)),
         Line::from(format!("Losses: {}", health.consecutive_losses)),
+        Line::from(format!(
+            "Binance window anchor: {}",
+            if health.binance_window_anchor { "ON" } else { "OFF" }
+        )),
     ];
 
     let block = Block::default()
@@ -302,6 +313,90 @@ fn render_polymarket(frame: &mut Frame, area: Rect, polymarket: &PolymarketPanel
         .block(block)
         .alignment(Alignment::Left);
     frame.render_widget(paragraph, area);
+}
+
+fn render_activity_log(frame: &mut Frame, area: Rect, entries: &[String]) {
+    let lines: Vec<Line> = if entries.is_empty() {
+        vec![Line::from("no recent activity")]
+    } else {
+        entries
+            .iter()
+            .map(|entry| Line::from(entry.as_str()))
+            .collect()
+    };
+
+    let block = Block::default()
+        .title(Span::styled(
+            " Activity Log ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .style(Style::default().fg(Color::Cyan));
+
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .alignment(Alignment::Left);
+    frame.render_widget(paragraph, area);
+}
+
+fn render_active_windows(frame: &mut Frame, area: Rect, windows: &[ActiveWindowRow]) {
+    let block = Block::default()
+        .title(Span::styled(
+            " Active Windows ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .style(Style::default().fg(Color::Cyan));
+
+    if windows.is_empty() {
+        let paragraph = Paragraph::new(Line::from("no window data"))
+            .block(block)
+            .alignment(Alignment::Left);
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
+    let header = Row::new(vec![
+        Cell::from("Asset"),
+        Cell::from("Status"),
+        Cell::from("Window (ET)"),
+        Cell::from("Market ID"),
+    ])
+    .style(
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    );
+
+    let rows = windows.iter().map(|row| {
+        Row::new(vec![
+            Cell::from(row.asset.clone()),
+            Cell::from(row.status.clone()),
+            Cell::from(row.window_et.clone()),
+            Cell::from(row.market_id.clone()),
+        ])
+    });
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(6),
+            Constraint::Length(10),
+            Constraint::Length(22),
+            Constraint::Length(12),
+        ],
+    )
+    .header(header)
+    .block(block)
+    .column_spacing(1);
+
+    frame.render_widget(table, area);
 }
 
 fn format_duration(duration: std::time::Duration) -> String {

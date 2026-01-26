@@ -20,6 +20,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::engine::types::{BinanceMarketUpdate, MarketUpdate};
 use crate::error::{BankaiError, Result};
+use crate::storage::redis::{AssetWindow, RedisManager};
 
 const STREAM_ID: u64 = 1;
 
@@ -28,6 +29,8 @@ pub struct BinanceOracleConfig {
     pub endpoint: String,
     pub symbols: Vec<String>,
     pub candle_interval: Duration,
+    pub window_refresh_interval: Duration,
+    pub redis: Option<RedisManager>,
 }
 
 pub struct BinanceOracle {
@@ -54,26 +57,47 @@ impl BinanceOracle {
         writer.send(Message::Text(payload)).await?;
 
         let mut states = HashMap::new();
+        let mut asset_windows: HashMap<String, AssetWindow> = HashMap::new();
+        let mut window_refresh = tokio::time::interval(self.config.window_refresh_interval);
 
-        while let Some(message) = reader.next().await {
-            let message = message?;
-            match message {
-                Message::Text(text) => {
-                    if let Some(event) = parse_event(&text)? {
-                        let asset = event.symbol().to_string();
-                        let state = states
-                            .entry(asset.clone())
-                            .or_insert_with(|| AssetState::new(self.config.candle_interval));
-                        if let Some(update) = state.apply_event(event)? {
-                            let _ = sender.send(MarketUpdate::Binance(update));
+        loop {
+            tokio::select! {
+                _ = window_refresh.tick() => {
+                    if let Some(redis) = self.config.redis.as_ref() {
+                        for symbol in &self.config.symbols {
+                            let asset_key = canonical_asset(symbol);
+                            if let Ok(Some(window)) = redis.get_asset_window(&asset_key).await {
+                                asset_windows.insert(asset_key, window);
+                            }
                         }
                     }
                 }
-                Message::Ping(payload) => {
-                    writer.send(Message::Pong(payload)).await?;
+                message = reader.next() => {
+                    match message {
+                        Some(Ok(Message::Text(text))) => {
+                            if let Some(event) = parse_event(&text)? {
+                                let asset = event.symbol().to_string();
+                                let asset_key = canonical_asset(&asset);
+                                let state = states
+                                    .entry(asset.clone())
+                                    .or_insert_with(|| AssetState::new(self.config.candle_interval));
+                                if let Some(window) = asset_windows.get(&asset_key) {
+                                    state.set_window(window);
+                                }
+                                if let Some(update) = state.apply_event(event)? {
+                                    let _ = sender.send(MarketUpdate::Binance(update));
+                                }
+                            }
+                        }
+                        Some(Ok(Message::Ping(payload))) => {
+                            writer.send(Message::Pong(payload)).await?;
+                        }
+                        Some(Ok(Message::Close(_))) => break,
+                        Some(Ok(_)) => {}
+                        Some(Err(error)) => return Err(error.into()),
+                        None => break,
+                    }
                 }
-                Message::Close(_) => break,
-                _ => {}
             }
         }
 
@@ -114,6 +138,7 @@ struct AssetState {
     candle_start_ms: Option<u64>,
     candle_open_price: Option<f64>,
     candle_interval_ms: u64,
+    anchor_start_ms: Option<u64>,
 }
 
 impl AssetState {
@@ -122,11 +147,28 @@ impl AssetState {
             last_price: None,
             best_bid: None,
             best_ask: None,
-            volatility: RollingVolatility::new(Duration::from_secs(60)),
+            volatility: RollingVolatility::new(candle_interval),
             last_volatility: None,
             candle_start_ms: None,
             candle_open_price: None,
             candle_interval_ms: candle_interval.as_millis() as u64,
+            anchor_start_ms: None,
+        }
+    }
+
+    fn set_window(&mut self, window: &AssetWindow) {
+        let interval_ms = window.end_time_ms.saturating_sub(window.start_time_ms);
+        if interval_ms == 0 {
+            return;
+        }
+        let changed = self.anchor_start_ms != Some(window.start_time_ms)
+            || self.candle_interval_ms != interval_ms;
+        if changed {
+            self.anchor_start_ms = Some(window.start_time_ms);
+            self.candle_interval_ms = interval_ms;
+            self.candle_start_ms = None;
+            self.candle_open_price = None;
+            self.volatility.reset(Duration::from_millis(interval_ms));
         }
     }
 
@@ -182,7 +224,15 @@ impl AssetState {
         if self.candle_interval_ms == 0 {
             return;
         }
-        let candle_start = timestamp_ms - (timestamp_ms % self.candle_interval_ms);
+        let candle_start = if let Some(anchor) = self.anchor_start_ms {
+            if timestamp_ms < anchor {
+                return;
+            }
+            let offset = timestamp_ms.saturating_sub(anchor);
+            anchor + (offset / self.candle_interval_ms) * self.candle_interval_ms
+        } else {
+            timestamp_ms - (timestamp_ms % self.candle_interval_ms)
+        };
         if self.candle_start_ms != Some(candle_start) {
             self.candle_start_ms = Some(candle_start);
             self.candle_open_price = Some(price);
@@ -203,6 +253,12 @@ impl RollingVolatility {
             samples: VecDeque::new(),
             last_price: None,
         }
+    }
+
+    fn reset(&mut self, window: Duration) {
+        self.window = window;
+        self.samples.clear();
+        self.last_price = None;
     }
 
     fn update(&mut self, price: f64, timestamp_ms: u64) -> Option<f64> {
@@ -227,6 +283,14 @@ impl RollingVolatility {
             }
         }
     }
+}
+
+fn canonical_asset(raw: &str) -> String {
+    let upper = raw.trim().to_ascii_uppercase();
+    upper
+        .strip_suffix("USDT")
+        .map(|value| value.to_string())
+        .unwrap_or(upper.to_string())
 }
 
 fn compute_stddev(samples: &VecDeque<(u64, f64)>) -> Option<f64> {

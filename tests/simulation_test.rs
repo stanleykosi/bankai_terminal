@@ -96,6 +96,7 @@ fn build_intent(row: &SimulationRow, max_staleness_ratio: f64) -> Option<TradeIn
             implied_prob: row.implied_prob,
             true_prob: row.true_prob,
             timestamp_ms: row.now_ms,
+            market_window: None,
         },
         &base_strategy(),
         &base_fees(),

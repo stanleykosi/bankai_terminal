@@ -3,14 +3,15 @@
  * Trade opportunity analysis for implied vs true probabilities and intent selection.
  *
  * @dependencies
- * - None (pure computations)
+ * - Optional Redis lookup helper for market time windows.
  *
  * @notes
  * - Enforces snipe guard: edge must clear taker fees + gas + 2%.
  */
 use crate::config::{FeeConfig, StrategyConfig};
-use crate::engine::types::{TradeIntent, TradeMode};
+use crate::engine::types::{MarketWindow, TradeIntent, TradeMode};
 use crate::error::{BankaiError, Result};
+use crate::storage::redis::RedisManager;
 
 const SNIPE_EDGE_BUFFER_BPS: f64 = 200.0;
 
@@ -21,6 +22,7 @@ pub struct AnalysisInput {
     pub implied_prob: f64,
     pub true_prob: f64,
     pub timestamp_ms: u64,
+    pub market_window: Option<MarketWindow>,
 }
 
 #[derive(Debug, Clone)]
@@ -38,6 +40,7 @@ pub enum TradeDecision {
     NoEdge,
     Ladder,
     Snipe,
+    OutOfWindow,
 }
 
 pub fn analyze_opportunity(
@@ -49,6 +52,20 @@ pub fn analyze_opportunity(
     let true_prob = validate_probability(input.true_prob, "true_prob")?;
     let edge = true_prob - implied_prob;
     let edge_bps = edge * 10_000.0;
+
+    if let Some(window) = input.market_window {
+        validate_market_window(window)?;
+        if !is_within_window(input.timestamp_ms, window) {
+            return Ok(AnalysisResult {
+                implied_prob,
+                true_prob,
+                edge,
+                edge_bps,
+                decision: TradeDecision::OutOfWindow,
+                intent: None,
+            });
+        }
+    }
 
     let decision = if edge_bps <= 0.0 {
         TradeDecision::NoEdge
@@ -75,8 +92,9 @@ pub fn analyze_opportunity(
             edge_bps,
             spread_offset_bps: strategy.spread_offset_bps,
             timestamp_ms: input.timestamp_ms,
+            market_window: input.market_window,
         }),
-        TradeDecision::NoEdge => None,
+        TradeDecision::NoEdge | TradeDecision::OutOfWindow => None,
     };
 
     Ok(AnalysisResult {
@@ -87,6 +105,18 @@ pub fn analyze_opportunity(
         decision,
         intent,
     })
+}
+
+pub async fn analyze_opportunity_with_redis(
+    mut input: AnalysisInput,
+    strategy: &StrategyConfig,
+    fees: &FeeConfig,
+    redis: &RedisManager,
+) -> Result<AnalysisResult> {
+    if input.market_window.is_none() {
+        input.market_window = redis.get_market_window(&input.market_id).await?;
+    }
+    analyze_opportunity(input, strategy, fees)
 }
 
 pub fn implied_probability_from_price(price: f64) -> Result<f64> {
@@ -121,6 +151,19 @@ fn validate_probability(value: f64, field: &str) -> Result<f64> {
     Ok(value)
 }
 
+fn validate_market_window(window: MarketWindow) -> Result<()> {
+    if window.end_time_ms <= window.start_time_ms {
+        return Err(BankaiError::InvalidArgument(
+            "market window end time must be after start time".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn is_within_window(timestamp_ms: u64, window: MarketWindow) -> bool {
+    timestamp_ms >= window.start_time_ms && timestamp_ms <= window.end_time_ms
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,6 +191,7 @@ mod tests {
             implied_prob,
             true_prob,
             timestamp_ms: 1_717_171_717,
+            market_window: None,
         }
     }
 
@@ -206,5 +250,24 @@ mod tests {
 
         let threshold = snipe_threshold_bps(&strategy, &fees);
         assert_eq!(threshold, 330.0);
+    }
+
+    #[test]
+    fn it_skips_when_outside_market_window() {
+        let input = AnalysisInput {
+            market_id: "m1".to_string(),
+            asset_id: "a1".to_string(),
+            implied_prob: 0.4,
+            true_prob: 0.6,
+            timestamp_ms: 1_000,
+            market_window: Some(MarketWindow {
+                start_time_ms: 2_000,
+                end_time_ms: 3_000,
+            }),
+        };
+
+        let result = analyze_opportunity(input, &base_strategy(), &base_fees()).unwrap();
+        assert_eq!(result.decision, TradeDecision::OutOfWindow);
+        assert!(result.intent.is_none());
     }
 }

@@ -30,6 +30,8 @@ use crate::engine::risk::{HaltReason, RiskState};
 use crate::engine::types::{AlloraMarketUpdate, BinanceMarketUpdate, MarketUpdate};
 use crate::error::Result;
 use crate::storage::redis::RedisManager;
+use chrono::{TimeZone, Utc};
+use chrono_tz::America::New_York;
 
 mod widgets;
 
@@ -38,6 +40,7 @@ const DEFAULT_MARKET_LIMIT: usize = 12;
 const DEFAULT_REFRESH_MS: u64 = 250;
 const DEFAULT_BANKROLL_REFRESH_MS: u64 = 2_000;
 const DEFAULT_POLYMARKET_REFRESH_MS: u64 = 5_000;
+const DEFAULT_ACTIVITY_LOG_LIMIT: usize = 8;
 const POLYMARKET_STALE_MS: u64 = 120_000;
 const ORACLE_ONLINE_MULTIPLIER: u64 = 3;
 
@@ -79,6 +82,7 @@ pub struct HealthPanelData {
     pub latency_ms: u64,
     pub clock_drift_ms: i64,
     pub consecutive_losses: u32,
+    pub binance_window_anchor: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -92,6 +96,14 @@ pub struct PolymarketPanelData {
     pub online: bool,
     pub asset_count: Option<usize>,
     pub last_refresh: Option<Duration>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ActiveWindowRow {
+    pub asset: String,
+    pub market_id: String,
+    pub window_et: String,
+    pub status: String,
 }
 
 #[derive(Debug, Clone)]
@@ -133,6 +145,8 @@ pub struct UiSnapshot {
     pub financials: FinancialPanelData,
     pub polymarket: PolymarketPanelData,
     pub markets: Vec<MarketRow>,
+    pub activity_log: Vec<String>,
+    pub active_windows: Vec<ActiveWindowRow>,
 }
 
 #[derive(Debug)]
@@ -255,6 +269,9 @@ async fn snapshot_loop(
     let pnl_24h: Option<f64> = None;
     let mut polymarket_asset_count: Option<usize> = None;
     let mut polymarket_last_refresh: Option<Instant> = None;
+    let mut activity_log: Vec<String> = Vec::new();
+    let mut binance_window_anchor = false;
+    let mut active_windows: Vec<ActiveWindowRow> = Vec::new();
 
     loop {
         tokio::select! {
@@ -297,6 +314,17 @@ async fn snapshot_loop(
                         }
                         Err(error) => tracing::warn!(?error, "failed to read polymarket asset ids from redis"),
                     }
+                    binance_window_anchor = redis.get_asset_window("BTC").await?.is_some()
+                        || redis.get_asset_window("ETH").await?.is_some()
+                        || redis.get_asset_window("SOL").await?.is_some();
+                    match load_active_windows(redis).await {
+                        Ok(rows) => active_windows = rows,
+                        Err(error) => tracing::warn!(?error, "failed to read active windows from redis"),
+                    }
+                    match redis.get_activity_log(DEFAULT_ACTIVITY_LOG_LIMIT).await {
+                        Ok(entries) => activity_log = entries,
+                        Err(error) => tracing::warn!(?error, "failed to read activity log from redis"),
+                    }
                 }
             }
             _ = refresh.tick() => {
@@ -310,6 +338,9 @@ async fn snapshot_loop(
                     polymarket_asset_count,
                     polymarket_last_refresh,
                     ui_config.market_limit,
+                    activity_log.clone(),
+                    binance_window_anchor,
+                    active_windows.clone(),
                 );
                 if sender.send(UiCommand::Snapshot(snapshot)).is_err() {
                     break;
@@ -331,6 +362,9 @@ fn build_snapshot(
     polymarket_asset_count: Option<usize>,
     polymarket_last_refresh: Option<Instant>,
     market_limit: usize,
+    activity_log: Vec<String>,
+    binance_window_anchor: bool,
+    active_windows: Vec<ActiveWindowRow>,
 ) -> UiSnapshot {
     let config = config.load_full();
     let risk_snapshot = risk.snapshot();
@@ -359,6 +393,7 @@ fn build_snapshot(
         latency_ms: risk_snapshot.last_latency_ms,
         clock_drift_ms: risk_snapshot.clock_drift_ms,
         consecutive_losses: risk_snapshot.consecutive_losses,
+        binance_window_anchor,
     };
 
     let financials = FinancialPanelData {
@@ -394,6 +429,8 @@ fn build_snapshot(
         financials,
         polymarket: polymarket_panel,
         markets,
+        activity_log,
+        active_windows,
     }
 }
 
@@ -491,6 +528,7 @@ fn ui_loop(receiver: mpsc::Receiver<UiCommand>, config: TuiConfig) -> UiResult<(
             latency_ms: 0,
             clock_drift_ms: 0,
             consecutive_losses: 0,
+            binance_window_anchor: false,
         },
         financials: FinancialPanelData {
             bankroll_usdc: None,
@@ -502,6 +540,8 @@ fn ui_loop(receiver: mpsc::Receiver<UiCommand>, config: TuiConfig) -> UiResult<(
             last_refresh: None,
         },
         markets: Vec::new(),
+        activity_log: Vec::new(),
+        active_windows: Vec::new(),
     };
 
     loop {
@@ -594,4 +634,52 @@ fn is_polymarket_online(last_refresh: Option<Instant>) -> bool {
     last_refresh
         .map(|ts| ts.elapsed().as_millis() as u64 <= POLYMARKET_STALE_MS)
         .unwrap_or(false)
+}
+
+async fn load_active_windows(redis: &RedisManager) -> Result<Vec<ActiveWindowRow>> {
+    let mut rows = Vec::new();
+    for asset in ["BTC", "ETH", "SOL"] {
+        match redis.get_asset_window(asset).await? {
+            Some(window) => {
+                let now = now_ms().unwrap_or(0);
+                let status = if now >= window.start_time_ms && now < window.end_time_ms {
+                    "ACTIVE"
+                } else if now < window.start_time_ms {
+                    "UPCOMING"
+                } else {
+                    "PAST"
+                };
+                rows.push(ActiveWindowRow {
+                    asset: asset.to_string(),
+                    market_id: window.market_id,
+                    window_et: format_window_et(window.start_time_ms, window.end_time_ms),
+                    status: status.to_string(),
+                });
+            }
+            None => rows.push(ActiveWindowRow {
+                asset: asset.to_string(),
+                market_id: "--".to_string(),
+                window_et: "--".to_string(),
+                status: "NONE".to_string(),
+            }),
+        }
+    }
+    Ok(rows)
+}
+
+fn format_window_et(start_ms: u64, end_ms: u64) -> String {
+    let start = Utc.timestamp_millis_opt(start_ms as i64).single();
+    let end = Utc.timestamp_millis_opt(end_ms as i64).single();
+    match (start, end) {
+        (Some(start), Some(end)) => {
+            let start_et = start.with_timezone(&New_York);
+            let end_et = end.with_timezone(&New_York);
+            format!(
+                "{}-{} ET",
+                start_et.format("%b %d %I:%M%p"),
+                end_et.format("%I:%M%p")
+            )
+        }
+        _ => "--".to_string(),
+    }
 }

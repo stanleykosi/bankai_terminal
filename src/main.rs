@@ -122,7 +122,7 @@ async fn main() -> Result<()> {
     let engine = EngineCore::new(config_state, risk.clone());
     let _engine_handle = engine.spawn(market_tx.subscribe());
 
-    spawn_binance_oracle(&config, market_tx.clone());
+    spawn_binance_oracle(&config, market_tx.clone()).await?;
     spawn_allora_oracle(&config, market_tx.clone())?;
     spawn_polymarket_oracles(&config).await?;
 
@@ -135,15 +135,31 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn spawn_binance_oracle(config: &Arc<Config>, sender: broadcast::Sender<MarketUpdate>) {
+async fn spawn_binance_oracle(
+    config: &Arc<Config>,
+    sender: broadcast::Sender<MarketUpdate>,
+) -> Result<()> {
     let symbols = derive_binance_symbols(config);
+    let redis = match std::env::var("REDIS_URL") {
+        Ok(url) => match RedisManager::new(&url).await {
+            Ok(manager) => Some(manager),
+            Err(error) => {
+                tracing::warn!(?error, "redis unavailable; binance window alignment disabled");
+                None
+            }
+        },
+        Err(_) => None,
+    };
     let binance_config = BinanceOracleConfig {
         endpoint: config.endpoints.binance_ws.clone(),
         symbols,
         candle_interval: Duration::from_secs(60),
+        window_refresh_interval: Duration::from_secs(5),
+        redis,
     };
     let oracle = BinanceOracle::new(binance_config);
     let _handle = oracle.spawn(sender);
+    Ok(())
 }
 
 fn spawn_allora_oracle(
