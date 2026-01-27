@@ -118,6 +118,9 @@ impl EngineCore {
         state: &mut EngineState,
         update: AlloraMarketUpdate,
     ) -> Result<()> {
+        if !is_five_min_signal(&update) {
+            return Ok(());
+        }
         state
             .last_allora
             .insert(update.asset.clone(), update.clone());
@@ -169,6 +172,10 @@ fn is_neutral_signal(allora: Option<&AlloraMarketUpdate>, price: Option<f64>) ->
     }
     let delta = (allora.inference_value - price) / price;
     delta.abs() < NEUTRAL_SIGNAL_THRESHOLD_PCT
+}
+
+fn is_five_min_signal(update: &AlloraMarketUpdate) -> bool {
+    update.timeframe.trim().eq_ignore_ascii_case("5m")
 }
 
 fn resolve_price(update: &BinanceMarketUpdate) -> Option<f64> {

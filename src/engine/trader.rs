@@ -20,7 +20,6 @@ use tokio::sync::{broadcast, mpsc};
 
 use crate::config::Config;
 use crate::engine::analysis::{analyze_opportunity, AnalysisInput};
-use crate::engine::risk::calculate_staleness_ratio;
 use crate::engine::risk::RiskState;
 use crate::engine::types::{
     AlloraMarketUpdate, BinanceMarketUpdate, MarketUpdate, MarketWindow, TradeIntent, TradeMode,
@@ -31,6 +30,9 @@ use crate::storage::redis::RedisManager;
 
 const DEFAULT_TICK_INTERVAL: Duration = Duration::from_secs(5);
 const ACTIVITY_LOG_LIMIT: usize = 50;
+const SIGNAL_HORIZON_MS: u64 = 5 * 60 * 1_000;
+const SIGNAL_TARGET_TOLERANCE_MS: u64 = 30_000;
+const SQRT_5: f64 = 2.236_067_977_5;
 
 pub struct TradingEngine {
     config: Arc<ArcSwap<Config>>,
@@ -140,9 +142,6 @@ impl TradingEngine {
         let Some(binance) = state.last_binance.get(asset) else {
             return Ok(());
         };
-        let Some(allora) = select_allora_update(&state.last_allora, asset) else {
-            return Ok(());
-        };
 
         let price = resolve_binance_price(binance).ok_or_else(|| {
             BankaiError::InvalidArgument("binance price missing".to_string())
@@ -164,13 +163,14 @@ impl TradingEngine {
             end_time_ms: asset_window.end_time_ms,
         };
 
-        if let Ok(staleness) =
-            calculate_staleness_ratio(now, allora.signal_timestamp_ms, window.end_time_ms)
-        {
-            if staleness > config.execution.staleness_max_ratio {
-                return Ok(());
-            }
-        } else {
+        let Some(aligned) =
+            select_aligned_5m_signal(&state.last_allora, asset, window, now)
+        else {
+            return Ok(());
+        };
+        let allora = aligned.update;
+        let alignment = aligned.alignment;
+        if now.saturating_sub(allora.signal_timestamp_ms) > SIGNAL_HORIZON_MS {
             return Ok(());
         }
 
@@ -212,12 +212,13 @@ impl TradingEngine {
             .await?
             .unwrap_or_else(|| (1.0 - implied_up).max(0.0));
 
-        let true_up = compute_true_probability(
+        let true_up = compute_true_probability_5m(
             price,
             allora.inference_value,
             volatility,
             config.execution.probability_scale,
             config.execution.probability_max_offset,
+            alignment,
         );
         let true_down = (1.0 - true_up).clamp(0.0, 1.0);
 
@@ -405,22 +406,54 @@ impl TraderState {
     }
 }
 
-fn select_allora_update<'a>(
-    updates: &'a HashMap<String, AlloraMarketUpdate>,
+struct AlignedSignal {
+    update: AlloraMarketUpdate,
+    alignment: f64,
+}
+
+fn select_aligned_5m_signal(
+    updates: &HashMap<String, AlloraMarketUpdate>,
     asset: &str,
-) -> Option<&'a AlloraMarketUpdate> {
-    let preferred = ["5m", "15m", "8h"];
-    for timeframe in preferred {
-        let key = format!("{asset}:{timeframe}");
-        if let Some(update) = updates.get(&key) {
-            return Some(update);
+    window: MarketWindow,
+    now_ms: u64,
+) -> Option<AlignedSignal> {
+    let target_ts = window.end_time_ms.saturating_sub(SIGNAL_HORIZON_MS);
+    let mut best: Option<(AlloraMarketUpdate, u64)> = None;
+
+    for (key, update) in updates.iter() {
+        if !key.starts_with(&format!("{asset}:")) {
+            continue;
+        }
+        if !update.timeframe.trim().eq_ignore_ascii_case("5m") {
+            continue;
+        }
+        if update.signal_timestamp_ms > now_ms {
+            continue;
+        }
+        if update.signal_timestamp_ms < window.start_time_ms
+            || update.signal_timestamp_ms > window.end_time_ms
+        {
+            continue;
+        }
+
+        let diff = update.signal_timestamp_ms.abs_diff(target_ts);
+        if diff > SIGNAL_TARGET_TOLERANCE_MS {
+            continue;
+        }
+
+        match best.as_ref() {
+            Some((_, best_diff)) if diff >= *best_diff => {}
+            _ => best = Some((update.clone(), diff)),
         }
     }
-    updates
-        .iter()
-        .filter(|(key, _)| key.starts_with(&format!("{asset}:")))
-        .map(|(_, update)| update)
-        .max_by_key(|update| update.received_at_ms)
+
+    best.map(|(update, diff)| {
+        let alignment = 1.0 - (diff as f64 / SIGNAL_HORIZON_MS as f64);
+        AlignedSignal {
+            update,
+            alignment: alignment.clamp(0.0, 1.0),
+        }
+    })
 }
 
 fn resolve_binance_price(update: &BinanceMarketUpdate) -> Option<f64> {
@@ -437,19 +470,21 @@ fn resolve_binance_price(update: &BinanceMarketUpdate) -> Option<f64> {
     }
 }
 
-fn compute_true_probability(
+fn compute_true_probability_5m(
     current_price: f64,
     predicted_price: f64,
-    volatility: f64,
+    volatility_1m: f64,
     scale: f64,
     max_offset: f64,
+    alignment: f64,
 ) -> f64 {
     if current_price <= 0.0 {
         return 0.5;
     }
     let delta = (predicted_price - current_price) / current_price;
-    let z = if volatility > 0.0 { delta / volatility } else { delta };
-    let offset = (z * scale).tanh() * max_offset;
+    let volatility_5m = (volatility_1m * SQRT_5).max(1e-9);
+    let z = delta / volatility_5m;
+    let offset = (z * scale).tanh() * max_offset * alignment;
     (0.5 + offset).clamp(0.01, 0.99)
 }
 

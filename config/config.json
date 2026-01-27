@@ -68,11 +68,8 @@
     "timeout_ms": 2000,
     "topics": [
       { "asset": "BTC", "timeframe": "5m" },
-      { "asset": "BTC", "timeframe": "8h" },
       { "asset": "ETH", "timeframe": "5m" },
-      { "asset": "ETH", "timeframe": "8h" },
-      { "asset": "SOL", "timeframe": "5m" },
-      { "asset": "SOL", "timeframe": "8h" }
+      { "asset": "SOL", "timeframe": "5m" }
     ]
   },
   "health": {
