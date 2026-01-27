@@ -14,6 +14,7 @@ use std::collections::HashMap;
 
 use crate::engine::types::MarketWindow;
 use crate::error::Result;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone)]
 pub struct RedisManager {
@@ -35,6 +36,8 @@ const TUI_ORDER_LOG_KEY: &str = "tui:order_log";
 const POSITIONS_TRACKED_PREFIX: &str = "positions:tracked:";
 const POSITIONS_ENTRY_PREFIX: &str = "positions:entry:";
 const POSITIONS_PEAK_PREFIX: &str = "positions:peak:";
+const ASSET_WINDOW_NEXT_PREFIX: &str = "polymarket:window_next:";
+const ASSET_WINDOW_CACHE_PREFIX: &str = "polymarket:windows:";
 
 #[derive(Debug, Clone)]
 pub struct AssetWindow {
@@ -216,26 +219,127 @@ impl RedisManager {
         Ok(())
     }
 
-    pub async fn get_asset_window(&self, asset: &str) -> Result<Option<AssetWindow>> {
-        let key = asset_window_key(asset);
+    pub async fn set_asset_window_next(
+        &self,
+        asset: &str,
+        window: MarketWindow,
+        market_id: &str,
+        updated_at_ms: u64,
+    ) -> Result<()> {
+        let key = asset_window_next_key(asset);
         let mut conn = self.connection.clone();
-        let start_time_ms: Option<i64> = conn.hget(key.as_str(), "startTimeMs").await?;
-        let end_time_ms: Option<i64> = conn.hget(key.as_str(), "endTimeMs").await?;
-        let market_id: Option<String> = conn.hget(key.as_str(), "marketId").await?;
-        let updated_at_ms: Option<i64> = conn.hget(key.as_str(), "updatedAtMs").await?;
-        match (start_time_ms, end_time_ms, market_id, updated_at_ms) {
-            (Some(start), Some(end), Some(market_id), Some(updated_at_ms))
-                if start > 0 && end > 0 && end > start =>
-            {
-                Ok(Some(AssetWindow {
-                    start_time_ms: start as u64,
-                    end_time_ms: end as u64,
-                    market_id,
-                    updated_at_ms: updated_at_ms as u64,
-                }))
-            }
-            _ => Ok(None),
+        conn.hset::<_, _, _, ()>(key.as_str(), "startTimeMs", window.start_time_ms as i64)
+            .await?;
+        conn.hset::<_, _, _, ()>(key.as_str(), "endTimeMs", window.end_time_ms as i64)
+            .await?;
+        conn.hset::<_, _, _, ()>(key.as_str(), "marketId", market_id)
+            .await?;
+        conn.hset::<_, _, _, ()>(key.as_str(), "updatedAtMs", updated_at_ms as i64)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn add_asset_window_cache(
+        &self,
+        asset: &str,
+        market_id: &str,
+        start_time_ms: u64,
+    ) -> Result<()> {
+        let key = asset_window_cache_key(asset);
+        let mut conn = self.connection.clone();
+        let _: () = redis::cmd("ZADD")
+            .arg(&key)
+            .arg(start_time_ms as i64)
+            .arg(market_id)
+            .query_async(&mut conn)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn prune_asset_window_cache(
+        &self,
+        asset: &str,
+        cutoff_ms: u64,
+    ) -> Result<usize> {
+        if cutoff_ms == 0 {
+            return Ok(0);
         }
+        let key = asset_window_cache_key(asset);
+        self.zremrangebyscore(&key, 0.0, cutoff_ms as f64).await
+    }
+
+    pub async fn clear_asset_window_next(&self, asset: &str) -> Result<()> {
+        let key = asset_window_next_key(asset);
+        let mut conn = self.connection.clone();
+        conn.del::<_, ()>(key).await?;
+        Ok(())
+    }
+
+    pub async fn get_asset_window(&self, asset: &str) -> Result<Option<AssetWindow>> {
+        let now = now_ms().unwrap_or(0);
+        let current = self.read_asset_window(asset_window_key(asset).as_str()).await?;
+        if let Some(window) = current {
+            if now < window.end_time_ms {
+                return Ok(Some(window));
+            }
+        }
+        if let Some(next) = self.get_asset_window_next(asset).await? {
+            let _ = self
+                .set_asset_window(
+                    asset,
+                    MarketWindow {
+                        start_time_ms: next.start_time_ms,
+                        end_time_ms: next.end_time_ms,
+                    },
+                    &next.market_id,
+                    now,
+                )
+                .await;
+            return Ok(Some(AssetWindow {
+                start_time_ms: next.start_time_ms,
+                end_time_ms: next.end_time_ms,
+                market_id: next.market_id,
+                updated_at_ms: now,
+            }));
+        }
+        if let Some((current, next)) = self.resolve_cached_window(asset, now).await? {
+            let _ = self
+                .set_asset_window(
+                    asset,
+                    MarketWindow {
+                        start_time_ms: current.start_time_ms,
+                        end_time_ms: current.end_time_ms,
+                    },
+                    &current.market_id,
+                    now,
+                )
+                .await;
+            if let Some(next) = next {
+                let _ = self
+                    .set_asset_window_next(
+                        asset,
+                        MarketWindow {
+                            start_time_ms: next.start_time_ms,
+                            end_time_ms: next.end_time_ms,
+                        },
+                        &next.market_id,
+                        now,
+                    )
+                    .await;
+            }
+            return Ok(Some(AssetWindow {
+                start_time_ms: current.start_time_ms,
+                end_time_ms: current.end_time_ms,
+                market_id: current.market_id,
+                updated_at_ms: now,
+            }));
+        }
+        Ok(None)
+    }
+
+    pub async fn get_asset_window_next(&self, asset: &str) -> Result<Option<AssetWindow>> {
+        self.read_asset_window(asset_window_next_key(asset).as_str())
+            .await
     }
 
     pub async fn push_activity_log(&self, entry: &str, max_len: usize) -> Result<()> {
@@ -416,6 +520,14 @@ fn asset_window_key(asset: &str) -> String {
     format!("polymarket:window:{asset}")
 }
 
+fn asset_window_next_key(asset: &str) -> String {
+    format!("{ASSET_WINDOW_NEXT_PREFIX}{asset}")
+}
+
+fn asset_window_cache_key(asset: &str) -> String {
+    format!("{ASSET_WINDOW_CACHE_PREFIX}{asset}")
+}
+
 fn tracked_positions_key(wallet_key: &str) -> String {
     format!("{POSITIONS_TRACKED_PREFIX}{wallet_key}")
 }
@@ -429,6 +541,27 @@ fn peak_price_key(wallet_key: &str) -> String {
 }
 
 impl RedisManager {
+    async fn read_asset_window(&self, key: &str) -> Result<Option<AssetWindow>> {
+        let mut conn = self.connection.clone();
+        let start_time_ms: Option<i64> = conn.hget(key, "startTimeMs").await?;
+        let end_time_ms: Option<i64> = conn.hget(key, "endTimeMs").await?;
+        let market_id: Option<String> = conn.hget(key, "marketId").await?;
+        let updated_at_ms: Option<i64> = conn.hget(key, "updatedAtMs").await?;
+        match (start_time_ms, end_time_ms, market_id, updated_at_ms) {
+            (Some(start), Some(end), Some(market_id), Some(updated_at_ms))
+                if start > 0 && end > 0 && end > start =>
+            {
+                Ok(Some(AssetWindow {
+                    start_time_ms: start as u64,
+                    end_time_ms: end as u64,
+                    market_id,
+                    updated_at_ms: updated_at_ms as u64,
+                }))
+            }
+            _ => Ok(None),
+        }
+    }
+
     async fn push_log(&self, key: &str, entry: &str, max_len: usize) -> Result<()> {
         let mut conn = self.connection.clone();
         let mut pipe = redis::pipe();
@@ -447,4 +580,65 @@ impl RedisManager {
         }
         Ok(conn.lrange(key, 0, (limit - 1) as isize).await?)
     }
+
+    async fn resolve_cached_window(
+        &self,
+        asset: &str,
+        now_ms: u64,
+    ) -> Result<Option<(AssetWindow, Option<AssetWindow>)>> {
+        let key = asset_window_cache_key(asset);
+        let horizon_ms = now_ms.saturating_add(24 * 60 * 60 * 1000);
+        let min_score = now_ms.saturating_sub(6 * 60 * 60 * 1000);
+        let candidates = self
+            .zrangebyscore(&key, min_score as f64, horizon_ms as f64)
+            .await?;
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+
+        let mut active: Option<AssetWindow> = None;
+        let mut next: Option<AssetWindow> = None;
+        for market_id in candidates {
+            let metadata = self.get_market_metadata(&market_id).await?;
+            let (Some(start), Some(end)) = (metadata.start_time_ms, metadata.end_time_ms) else {
+                continue;
+            };
+            if now_ms >= start && now_ms < end {
+                active = Some(AssetWindow {
+                    start_time_ms: start,
+                    end_time_ms: end,
+                    market_id: market_id.clone(),
+                    updated_at_ms: now_ms,
+                });
+            } else if start > now_ms {
+                let candidate = AssetWindow {
+                    start_time_ms: start,
+                    end_time_ms: end,
+                    market_id: market_id.clone(),
+                    updated_at_ms: now_ms,
+                };
+                if next
+                    .as_ref()
+                    .map(|current| current.start_time_ms <= start)
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+                next = Some(candidate);
+            }
+        }
+
+        if let Some(active) = active {
+            return Ok(Some((active, next)));
+        }
+        if let Some(next) = next {
+            return Ok(Some((next, None)));
+        }
+        Ok(None)
+    }
+}
+
+fn now_ms() -> Option<u64> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
+    Some(now.as_millis() as u64)
 }

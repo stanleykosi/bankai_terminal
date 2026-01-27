@@ -14,7 +14,7 @@
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -23,6 +23,15 @@ use crate::error::{BankaiError, Result};
 use crate::storage::redis::{AssetWindow, RedisManager};
 
 const STREAM_ID: u64 = 1;
+
+fn compute_jitter(max_ms: u64) -> Result<Duration> {
+    if max_ms == 0 {
+        return Ok(Duration::from_millis(0));
+    }
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?;
+    let jitter = now.subsec_millis() as u64 % (max_ms + 1);
+    Ok(Duration::from_millis(jitter))
+}
 
 #[derive(Debug, Clone)]
 pub struct BinanceOracleConfig {
@@ -51,58 +60,162 @@ impl BinanceOracle {
     }
 
     async fn run(self, sender: broadcast::Sender<MarketUpdate>) -> Result<()> {
-        let (ws_stream, _) = tokio_tungstenite::connect_async(&self.config.endpoint).await?;
-        let (mut writer, mut reader) = ws_stream.split();
-        let payload = subscribe_payload(&self.config.symbols)?;
-        writer.send(Message::Text(payload)).await?;
-
         let mut states = HashMap::new();
         let mut asset_windows: HashMap<String, AssetWindow> = HashMap::new();
         let mut window_refresh = tokio::time::interval(self.config.window_refresh_interval);
+        let mut backoff = ReconnectBackoff::new();
+        let endpoints = build_ws_endpoints(&self.config.endpoint);
+
+        let mut endpoint_index = 0usize;
+        let mut primary_failures = 0u32;
 
         loop {
-            tokio::select! {
-                _ = window_refresh.tick() => {
-                    if let Some(redis) = self.config.redis.as_ref() {
-                        for symbol in &self.config.symbols {
-                            let asset_key = canonical_asset(symbol);
-                            if let Ok(Some(window)) = redis.get_asset_window(&asset_key).await {
-                                asset_windows.insert(asset_key, window);
+            let endpoint = endpoints
+                .get(endpoint_index)
+                .cloned()
+                .unwrap_or_else(|| self.config.endpoint.clone());
+            tracing::warn!(endpoint = %endpoint, "binance ws connecting");
+
+            let ws_stream = match tokio_tungstenite::connect_async(&endpoint).await {
+                Ok((stream, _)) => {
+                    tracing::info!(endpoint = %endpoint, "binance ws connected");
+                    backoff.reset();
+                    primary_failures = 0;
+                    stream
+                }
+                Err(error) => {
+                    tracing::warn!(?error, endpoint = %endpoint, "binance ws connect failed");
+                    if endpoint_index == 0 {
+                        primary_failures += 1;
+                        if primary_failures >= 10 && endpoints.len() > 1 {
+                            endpoint_index = 1;
+                            tracing::warn!(
+                                "binance ws primary failed 10 times; switching to fallback endpoint"
+                            );
+                        }
+                    } else {
+                        endpoint_index = 0;
+                    }
+                    let delay = backoff.next_delay()?;
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+            };
+
+            let (mut writer, mut reader) = ws_stream.split();
+            let payload = subscribe_payload(&self.config.symbols)?;
+            if let Err(error) = writer.send(Message::Text(payload)).await {
+                tracing::warn!(?error, endpoint = %endpoint, "binance ws subscribe failed");
+                let delay = backoff.next_delay()?;
+                tokio::time::sleep(delay).await;
+                continue;
+            }
+
+            loop {
+                tokio::select! {
+                    _ = window_refresh.tick() => {
+                        if let Some(redis) = self.config.redis.as_ref() {
+                            for symbol in &self.config.symbols {
+                                let asset_key = canonical_asset(symbol);
+                                if let Ok(Some(window)) = redis.get_asset_window(&asset_key).await {
+                                    asset_windows.insert(asset_key, window);
+                                }
                             }
                         }
                     }
-                }
-                message = reader.next() => {
-                    match message {
-                        Some(Ok(Message::Text(text))) => {
-                            if let Some(event) = parse_event(&text)? {
-                                let asset = event.symbol().to_string();
-                                let asset_key = canonical_asset(&asset);
-                                let state = states
-                                    .entry(asset.clone())
-                                    .or_insert_with(|| AssetState::new(self.config.candle_interval));
-                                if let Some(window) = asset_windows.get(&asset_key) {
-                                    state.set_window(window);
-                                }
-                                if let Some(update) = state.apply_event(event)? {
-                                    let _ = sender.send(MarketUpdate::Binance(update));
+                    message = reader.next() => {
+                        match message {
+                            Some(Ok(Message::Text(text))) => {
+                                if let Some(event) = parse_event(&text)? {
+                                    let asset = event.symbol().to_string();
+                                    let asset_key = canonical_asset(&asset);
+                                    let state = states
+                                        .entry(asset.clone())
+                                        .or_insert_with(|| AssetState::new(self.config.candle_interval));
+                                    if let Some(window) = asset_windows.get(&asset_key) {
+                                        state.set_window(window);
+                                    }
+                                    if let Some(update) = state.apply_event(event)? {
+                                        let _ = sender.send(MarketUpdate::Binance(update));
+                                    }
                                 }
                             }
+                            Some(Ok(Message::Ping(payload))) => {
+                                if let Err(error) = writer.send(Message::Pong(payload)).await {
+                                    tracing::warn!(?error, "binance ws pong failed");
+                                    break;
+                                }
+                            }
+                            Some(Ok(Message::Close(frame))) => {
+                                tracing::warn!(?frame, endpoint = %endpoint, "binance ws closed");
+                                break;
+                            }
+                            Some(Ok(_)) => {}
+                            Some(Err(error)) => {
+                                tracing::warn!(?error, endpoint = %endpoint, "binance ws error");
+                                break;
+                            }
+                            None => {
+                                tracing::warn!(endpoint = %endpoint, "binance ws stream ended");
+                                break;
+                            }
                         }
-                        Some(Ok(Message::Ping(payload))) => {
-                            writer.send(Message::Pong(payload)).await?;
-                        }
-                        Some(Ok(Message::Close(_))) => break,
-                        Some(Ok(_)) => {}
-                        Some(Err(error)) => return Err(error.into()),
-                        None => break,
                     }
                 }
             }
-        }
 
-        Ok(())
+            if endpoint_index != 0 {
+                endpoint_index = 0;
+            }
+            let delay = backoff.next_delay()?;
+            tokio::time::sleep(delay).await;
+        }
     }
+}
+
+struct ReconnectBackoff {
+    attempts: u32,
+    base_ms: u64,
+    max_ms: u64,
+}
+
+impl ReconnectBackoff {
+    fn new() -> Self {
+        Self {
+            attempts: 0,
+            base_ms: 500,
+            max_ms: 30_000,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.attempts = 0;
+    }
+
+    fn next_delay(&mut self) -> Result<Duration> {
+        self.attempts = self.attempts.saturating_add(1);
+        let exp = self.base_ms.saturating_mul(2u64.saturating_pow(self.attempts.min(6)));
+        let capped = exp.min(self.max_ms);
+        let jitter = compute_jitter(1_000)?;
+        Ok(Duration::from_millis(capped).saturating_add(jitter))
+    }
+}
+
+fn build_ws_endpoints(primary: &str) -> Vec<String> {
+    let mut endpoints = Vec::new();
+    let primary_trim = primary.trim().trim_end_matches('/');
+    if !primary_trim.is_empty() {
+        endpoints.push(primary_trim.to_string());
+    }
+    for fallback in [
+        "wss://stream.binance.com:443/ws",
+        "wss://data-stream.binance.vision/ws",
+    ] {
+        if !endpoints.iter().any(|entry| entry == fallback) {
+            endpoints.push(fallback.to_string());
+        }
+    }
+    endpoints
 }
 
 #[derive(Debug)]

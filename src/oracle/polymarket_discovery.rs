@@ -29,6 +29,7 @@ const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(30);
 const DEFAULT_JITTER_MS: u64 = 3_000;
 const DEFAULT_MIN_LIQUIDITY: f64 = 2000.0;
 const ACTIVITY_LOG_LIMIT: usize = 50;
+const WINDOW_CACHE_PRUNE_LAG_MS: u64 = 30 * 60 * 1_000;
 
 #[derive(Debug, Clone)]
 pub struct PolymarketDiscoveryConfig {
@@ -135,6 +136,14 @@ impl PolymarketDiscovery {
                                 .await?;
                             accepted += 1;
                             let label = market_label(market);
+                            let _ = self
+                                .redis
+                                .add_asset_window_cache(
+                                    asset_symbol.as_str(),
+                                    &metadata.market_id,
+                                    metadata.start_time_ms,
+                                )
+                                .await;
                             windows_by_asset
                                 .entry(asset_symbol)
                                 .or_default()
@@ -166,9 +175,13 @@ impl PolymarketDiscovery {
             .await;
         let mut asset_ids: Vec<String> = asset_ids.into_iter().collect();
         asset_ids.sort();
-        self.redis.set_polymarket_asset_ids(&asset_ids).await?;
-        self.log_refresh_summary(scanned, accepted, asset_ids.len())
-            .await;
+        if asset_ids.is_empty() {
+            self.log_refresh_summary(scanned, accepted, 0, true).await;
+        } else {
+            self.redis.set_polymarket_asset_ids(&asset_ids).await?;
+            self.log_refresh_summary(scanned, accepted, asset_ids.len(), false)
+                .await;
+        }
         Ok(())
     }
 
@@ -215,11 +228,23 @@ impl PolymarketDiscovery {
         }
     }
 
-    async fn log_refresh_summary(&self, scanned: usize, accepted: usize, asset_count: usize) {
+    async fn log_refresh_summary(
+        &self,
+        scanned: usize,
+        accepted: usize,
+        asset_count: usize,
+        retained_cached: bool,
+    ) {
         let prefix = log_prefix();
-        let message = format!(
-            "{prefix} Discovery scan: scanned={scanned} accepted={accepted} assets={asset_count}"
-        );
+        let message = if retained_cached {
+            format!(
+                "{prefix} Discovery scan: scanned={scanned} accepted={accepted} assets=0 (retained cached)"
+            )
+        } else {
+            format!(
+                "{prefix} Discovery scan: scanned={scanned} accepted={accepted} assets={asset_count}"
+            )
+        };
         let _ = self
             .redis
             .push_activity_log(&message, ACTIVITY_LOG_LIMIT)
@@ -233,7 +258,19 @@ impl PolymarketDiscovery {
     ) {
         let now_ms = now_ms().unwrap_or(0);
         for (asset, windows) in windows_by_asset {
-            let Some(candidate) = pick_asset_window(now_ms, &windows) else {
+            let (active, first_upcoming, second_upcoming) =
+                pick_asset_windows(now_ms, &windows);
+            let candidate = active.clone().or(first_upcoming.clone());
+            let Some(candidate) = candidate else {
+                let prefix = log_prefix();
+                let message = format!(
+                    "{prefix} Window select {} none (no active/upcoming in fetch)",
+                    asset.as_str()
+                );
+                let _ = self
+                    .redis
+                    .push_activity_log(&message, ACTIVITY_LOG_LIMIT)
+                    .await;
                 continue;
             };
             let window = candidate.window;
@@ -245,6 +282,39 @@ impl PolymarketDiscovery {
                 .await;
             for asset_id in &candidate.asset_ids {
                 asset_ids.insert(asset_id.clone());
+            }
+            let next_window = if active.is_some() {
+                first_upcoming.clone()
+            } else {
+                second_upcoming.clone()
+            };
+            if let Some(next_window) = next_window {
+                if next_window.market_id != candidate.market_id {
+                    let _ = self
+                        .redis
+                        .set_asset_window_next(
+                            asset.as_str(),
+                            to_market_window(next_window.window),
+                            &next_window.market_id,
+                            now_ms,
+                        )
+                        .await;
+                    for asset_id in &next_window.asset_ids {
+                        asset_ids.insert(asset_id.clone());
+                    }
+                } else {
+                    let _ = self.redis.clear_asset_window_next(asset.as_str()).await;
+                }
+            } else {
+                let _ = self.redis.clear_asset_window_next(asset.as_str()).await;
+            }
+
+            if now_ms > WINDOW_CACHE_PRUNE_LAG_MS {
+                let cutoff = now_ms - WINDOW_CACHE_PRUNE_LAG_MS;
+                let _ = self
+                    .redis
+                    .prune_asset_window_cache(asset.as_str(), cutoff)
+                    .await;
             }
             let changed = self
                 .last_asset_windows
@@ -350,11 +420,7 @@ fn is_open_market(market: &Value) -> bool {
         .get("closed")
         .and_then(|value| value.as_bool())
         .unwrap_or(false);
-    let active = market
-        .get("active")
-        .and_then(|value| value.as_bool())
-        .unwrap_or(true);
-    !closed && active
+    !closed
 }
 
 // Match Tag Logic
@@ -872,9 +938,16 @@ fn format_window_et(window: &MarketTimeWindow) -> String {
     }
 }
 
-fn pick_asset_window(now_ms: u64, windows: &[MarketCandidate]) -> Option<MarketCandidate> {
+fn pick_asset_windows(
+    now_ms: u64,
+    windows: &[MarketCandidate],
+) -> (
+    Option<MarketCandidate>,
+    Option<MarketCandidate>,
+    Option<MarketCandidate>,
+) {
     let mut active: Option<&MarketCandidate> = None;
-    let mut next: Option<&MarketCandidate> = None;
+    let mut upcoming: Vec<&MarketCandidate> = Vec::new();
 
     for candidate in windows {
         let window = candidate.window;
@@ -884,14 +957,15 @@ fn pick_asset_window(now_ms: u64, windows: &[MarketCandidate]) -> Option<MarketC
                 _ => active = Some(candidate),
             }
         } else if window.start_time_ms > now_ms {
-            match next {
-                Some(current) if current.window.start_time_ms <= window.start_time_ms => {}
-                _ => next = Some(candidate),
-            }
+            upcoming.push(candidate);
         }
     }
 
-    active.or(next).cloned()
+    upcoming.sort_by_key(|candidate| candidate.window.start_time_ms);
+    let first_upcoming = upcoming.get(0).copied().cloned();
+    let second_upcoming = upcoming.get(1).copied().cloned();
+
+    (active.cloned(), first_upcoming, second_upcoming)
 }
 
 fn to_market_window(window: MarketTimeWindow) -> MarketWindow {
