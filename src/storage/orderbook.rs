@@ -118,6 +118,36 @@ impl OrderBookStore {
         Ok(levels.pop())
     }
 
+    pub async fn best_bid_ask(&self, token_id: &str) -> Result<Option<(f64, f64)>> {
+        let bid = self
+            .best_level(token_id, BookSide::Bid)
+            .await?
+            .and_then(|level| level.price.parse::<f64>().ok());
+        let ask = self
+            .best_level(token_id, BookSide::Ask)
+            .await?
+            .and_then(|level| level.price.parse::<f64>().ok());
+        match (bid, ask) {
+            (Some(bid), Some(ask)) if bid > 0.0 && ask > 0.0 => Ok(Some((bid, ask))),
+            _ => Ok(None),
+        }
+    }
+
+    pub async fn set_last_trade_price(
+        &self,
+        token_id: &str,
+        price: f64,
+        updated_at_ms: u64,
+    ) -> Result<()> {
+        self.redis
+            .set_last_trade_price(token_id, price, updated_at_ms)
+            .await
+    }
+
+    pub async fn last_trade_price(&self, token_id: &str) -> Result<Option<f64>> {
+        self.redis.get_last_trade_price(token_id).await
+    }
+
     pub async fn top_levels(
         &self,
         token_id: &str,

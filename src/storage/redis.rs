@@ -41,6 +41,7 @@ const ASSET_WINDOW_CACHE_PREFIX: &str = "polymarket:windows:";
 const FEE_RATE_PREFIX: &str = "polymarket:fee_rate:";
 const ASSET_START_PRICE_PREFIX: &str = "polymarket:start_price:";
 const ORDERBOOK_TS_PREFIX: &str = "polymarket:book_ts:";
+const LAST_TRADE_PREFIX: &str = "polymarket:last_trade:";
 const TOKEN_MARKET_PREFIX: &str = "polymarket:token_market:";
 
 #[derive(Debug, Clone)]
@@ -444,6 +445,26 @@ impl RedisManager {
         Ok(())
     }
 
+    pub async fn set_last_trade_price(
+        &self,
+        token_id: &str,
+        price: f64,
+        updated_at_ms: u64,
+    ) -> Result<()> {
+        let key = last_trade_key(token_id);
+        let mut conn = self.connection.clone();
+        conn.hset::<_, _, _, ()>(key.as_str(), "price", price)
+            .await?;
+        conn.hset::<_, _, _, ()>(key.as_str(), "updatedAtMs", updated_at_ms as i64)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn get_last_trade_price(&self, token_id: &str) -> Result<Option<f64>> {
+        let key = last_trade_key(token_id);
+        self.hget_float(&key, "price").await
+    }
+
     pub async fn get_orderbook_update_ms(&self, token_id: &str) -> Result<Option<u64>> {
         let key = orderbook_ts_key(token_id);
         let updated_at_ms = self.hget_i64(&key, "updatedAtMs").await?;
@@ -662,6 +683,10 @@ fn asset_start_price_key(asset: &str) -> String {
 
 fn orderbook_ts_key(token_id: &str) -> String {
     format!("{ORDERBOOK_TS_PREFIX}{token_id}")
+}
+
+fn last_trade_key(token_id: &str) -> String {
+    format!("{LAST_TRADE_PREFIX}{token_id}")
 }
 
 fn token_market_key(token_id: &str) -> String {

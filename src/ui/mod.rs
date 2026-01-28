@@ -25,12 +25,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
 
 use crate::accounting::keys::PNL_24H_KEY;
-use crate::config::Config;
+use crate::config::{Config, ExecutionConfig, StrategyConfig};
 use crate::engine::analysis::snipe_threshold_bps;
 use crate::engine::risk::{HaltReason, RiskState};
 use crate::engine::types::{AlloraMarketUpdate, BinanceMarketUpdate, MarketUpdate, MarketWindow};
 use crate::error::Result;
-use crate::storage::orderbook::OrderBookStore;
+use crate::storage::orderbook::{BookSide, OrderBookStore};
 use crate::storage::redis::RedisManager;
 use chrono::{TimeZone, Utc};
 use chrono_tz::America::New_York;
@@ -189,6 +189,14 @@ struct MarketSnapshot {
     price: Option<f64>,
     implied_up: Option<f64>,
     implied_down: Option<f64>,
+    implied_up_mid: Option<f64>,
+    implied_down_mid: Option<f64>,
+    implied_up_vwap: Option<f64>,
+    implied_down_vwap: Option<f64>,
+    last_trade_up: Option<f64>,
+    last_trade_down: Option<f64>,
+    up_token_id: Option<String>,
+    down_token_id: Option<String>,
     market_id: Option<String>,
     window: Option<MarketWindow>,
     start_price: Option<f64>,
@@ -208,6 +216,14 @@ impl MarketSnapshot {
             price: None,
             implied_up: None,
             implied_down: None,
+            implied_up_mid: None,
+            implied_down_mid: None,
+            implied_up_vwap: None,
+            implied_down_vwap: None,
+            last_trade_up: None,
+            last_trade_down: None,
+            up_token_id: None,
+            down_token_id: None,
             market_id: None,
             window: None,
             start_price: None,
@@ -402,7 +418,9 @@ async fn snapshot_loop(
                         }
                     }
                     if let Some(orderbook) = orderbook.as_ref() {
-                        if let Err(error) = refresh_market_snapshots(redis, orderbook, &mut market_state).await {
+                        if let Err(error) =
+                            refresh_market_snapshots(redis, orderbook, &config, bankroll_usdc, &mut market_state).await
+                        {
                             tracing::warn!(?error, "failed to refresh market snapshots");
                         }
                     }
@@ -410,7 +428,9 @@ async fn snapshot_loop(
             }
             _ = refresh.tick() => {
                 if let (Some(redis), Some(orderbook)) = (redis.as_ref(), orderbook.as_ref()) {
-                    if let Err(error) = refresh_market_snapshots(redis, orderbook, &mut market_state).await {
+                    if let Err(error) =
+                        refresh_market_snapshots(redis, orderbook, &config, bankroll_usdc, &mut market_state).await
+                    {
                         tracing::warn!(?error, "failed to refresh market snapshots");
                     }
                 }
@@ -445,14 +465,26 @@ async fn snapshot_loop(
 async fn refresh_market_snapshots(
     redis: &RedisManager,
     orderbook: &OrderBookStore,
+    config: &Arc<ArcSwap<Config>>,
+    bankroll_usdc: Option<f64>,
     market_state: &mut HashMap<String, MarketSnapshot>,
 ) -> Result<()> {
+    let config = config.load_full();
+    let now_ms = now_ms().unwrap_or(0);
     for snapshot in market_state.values_mut() {
         let Some(window) = redis.get_asset_window(&snapshot.asset).await? else {
             snapshot.market_id = None;
             snapshot.window = None;
             snapshot.implied_up = None;
             snapshot.implied_down = None;
+            snapshot.implied_up_mid = None;
+            snapshot.implied_down_mid = None;
+            snapshot.implied_up_vwap = None;
+            snapshot.implied_down_vwap = None;
+            snapshot.last_trade_up = None;
+            snapshot.last_trade_down = None;
+            snapshot.up_token_id = None;
+            snapshot.down_token_id = None;
             snapshot.start_price = None;
             snapshot.fee_rate_up_bps = None;
             snapshot.fee_rate_down_bps = None;
@@ -469,15 +501,145 @@ async fn refresh_market_snapshots(
         };
         let metadata = redis.get_market_metadata(&window.market_id).await?;
         if let Some(up_token) = metadata.outcome_up_token_id {
-            snapshot.implied_up = orderbook.mid_price(&up_token).await?;
+            snapshot.up_token_id = Some(up_token.clone());
+            let mid = orderbook.mid_price(&up_token).await?;
+            snapshot.implied_up_mid = mid;
+            snapshot.last_trade_up = orderbook.last_trade_price(&up_token).await?;
+            let best = orderbook.best_bid_ask(&up_token).await?;
+            snapshot.implied_up = resolve_display_price(mid, best, snapshot.last_trade_up);
             snapshot.fee_rate_up_bps = redis.get_fee_rate_bps(&up_token).await?;
+            snapshot.implied_up_vwap = estimate_vwap_price(
+                orderbook,
+                &up_token,
+                snapshot,
+                snapshot.implied_up_mid,
+                &config,
+                bankroll_usdc,
+                now_ms,
+            )
+            .await?;
         }
         if let Some(down_token) = metadata.outcome_down_token_id {
-            snapshot.implied_down = orderbook.mid_price(&down_token).await?;
+            snapshot.down_token_id = Some(down_token.clone());
+            let mid = orderbook.mid_price(&down_token).await?;
+            snapshot.implied_down_mid = mid;
+            snapshot.last_trade_down = orderbook.last_trade_price(&down_token).await?;
+            let best = orderbook.best_bid_ask(&down_token).await?;
+            snapshot.implied_down = resolve_display_price(mid, best, snapshot.last_trade_down);
             snapshot.fee_rate_down_bps = redis.get_fee_rate_bps(&down_token).await?;
+            snapshot.implied_down_vwap = estimate_vwap_price(
+                orderbook,
+                &down_token,
+                snapshot,
+                snapshot.implied_down_mid,
+                &config,
+                bankroll_usdc,
+                now_ms,
+            )
+            .await?;
         }
     }
     Ok(())
+}
+
+fn resolve_display_price(
+    mid: Option<f64>,
+    best: Option<(f64, f64)>,
+    last_trade: Option<f64>,
+) -> Option<f64> {
+    let mid = mid?;
+    if let Some((bid, ask)) = best {
+        let spread = (ask - bid).abs();
+        if spread > 0.10 {
+            if let Some(last) = last_trade {
+                if last > 0.0 {
+                    return Some(last);
+                }
+            }
+        }
+    }
+    Some(mid)
+}
+
+async fn estimate_vwap_price(
+    orderbook: &OrderBookStore,
+    token_id: &str,
+    snapshot: &MarketSnapshot,
+    implied_mid: Option<f64>,
+    config: &Config,
+    bankroll_usdc: Option<f64>,
+    now_ms: u64,
+) -> Result<Option<f64>> {
+    let Some(implied_mid) = implied_mid else {
+        return Ok(None);
+    };
+    let alignment = alignment_factor(snapshot, now_ms);
+    let volatility_1m = snapshot
+        .volatility_1m
+        .unwrap_or(config.execution.min_volatility)
+        .max(config.execution.min_volatility);
+    let true_up = match (snapshot.start_price, snapshot.inference_5m, alignment) {
+        (Some(start_price), Some(predicted), Some(alignment)) => Some(compute_true_probability_5m(
+            start_price,
+            predicted,
+            volatility_1m,
+            config.execution.probability_scale,
+            config.execution.probability_max_offset,
+            alignment,
+        )),
+        _ => None,
+    };
+    let Some(true_up) = true_up else {
+        return Ok(None);
+    };
+    let Some(size) = estimate_order_size(
+        bankroll_usdc,
+        true_up,
+        implied_mid,
+        &config.execution,
+        &config.strategy,
+    ) else {
+        return Ok(None);
+    };
+    let vwap = orderbook
+        .vwap_for_size(token_id, BookSide::Ask, size, 50)
+        .await?;
+    Ok(vwap.map(|value| value.avg_price))
+}
+
+fn estimate_order_size(
+    bankroll_usdc: Option<f64>,
+    true_prob: f64,
+    price: f64,
+    execution: &ExecutionConfig,
+    strategy: &StrategyConfig,
+) -> Option<f64> {
+    if price <= 0.0 {
+        return None;
+    }
+    let odds = 1.0 / price;
+    let kelly = calculate_kelly(true_prob, odds);
+    let target = bankroll_usdc
+        .map(|bankroll| bankroll * strategy.kelly_fraction * kelly)
+        .unwrap_or(execution.default_order_usdc);
+    let notional = target.clamp(execution.min_order_usdc, execution.max_order_usdc);
+    if notional < execution.min_order_usdc {
+        return None;
+    }
+    Some(notional / price)
+}
+
+fn calculate_kelly(win_prob: f64, odds: f64) -> f64 {
+    if win_prob <= 0.0 || win_prob >= 1.0 {
+        return 0.0;
+    }
+    if odds <= 1.0 {
+        return 0.0;
+    }
+    let payout = odds - 1.0;
+    let loss_prob = 1.0 - win_prob;
+    let kelly = (win_prob * payout - loss_prob) / payout;
+    kelly.clamp(0.0, 1.0)
 }
 
 fn build_snapshot(
@@ -586,9 +748,17 @@ fn build_market_row(
     let last_update_ms = snapshot.last_binance_ms.max(snapshot.last_allora_ms);
 
     let implied_up = snapshot.implied_up;
-    let implied_down = snapshot
+    let _implied_down = snapshot
         .implied_down
         .or_else(|| implied_up.map(|v| (1.0 - v).max(0.0)));
+    let implied_up_mid = snapshot.implied_up_mid;
+    let implied_down_mid = snapshot
+        .implied_down_mid
+        .or_else(|| implied_up_mid.map(|v| (1.0 - v).max(0.0)));
+    let implied_up_vwap = snapshot.implied_up_vwap;
+    let implied_down_vwap = snapshot
+        .implied_down_vwap
+        .or_else(|| implied_up_vwap.map(|v| (1.0 - v).max(0.0)));
 
     let alignment = alignment_factor(snapshot, now_ms);
     let volatility_1m = snapshot
@@ -609,50 +779,32 @@ fn build_market_row(
     };
     let true_down = true_up.map(|value| (1.0 - value).clamp(0.0, 1.0));
 
-    let edge_up = match (true_up, implied_up) {
-        (Some(true_up), Some(implied)) => Some((true_up - implied) * 10_000.0),
-        _ => None,
-    };
-    let edge_down = match (true_down, implied_down) {
-        (Some(true_down), Some(implied)) => Some((true_down - implied) * 10_000.0),
-        _ => None,
-    };
+    let decision_up = decide_edge(true_up, implied_up_mid, implied_up_vwap, snipe_floor_bps);
+    let decision_down = decide_edge(
+        true_down,
+        implied_down_mid,
+        implied_down_vwap,
+        snipe_floor_bps,
+    );
 
-    let (edge_bps, side, mode) = match (edge_up, edge_down) {
+    let (edge_bps, side, mode) = match (decision_up.clone(), decision_down.clone()) {
         (None, None) => (None, None, MarketMode::NoSignal),
         _ => {
-            let mut best_side = None;
-            let mut best_edge = None;
-            if let Some(edge) = edge_up {
-                best_edge = Some(edge);
-                best_side = Some("UP");
-            }
-            if let Some(edge) = edge_down {
-                let replace = match best_edge {
-                    Some(current) => edge > current,
+            let mut best = decision_up.map(|edge| ("UP", edge));
+            if let Some(edge) = decision_down {
+                let replace = match best {
+                    Some((_, ref current)) => edge.edge_bps > current.edge_bps,
                     None => true,
                 };
                 if replace {
-                    best_edge = Some(edge);
-                    best_side = Some("DOWN");
+                    best = Some(("DOWN", edge));
                 }
             }
-
-            match best_edge {
-                Some(edge) if edge > 0.0 && edge >= snipe_floor_bps => (
-                    Some(edge),
-                    best_side.map(|v| v.to_string()),
-                    MarketMode::Snipe,
-                ),
-                Some(edge) if edge > 0.0 => (
-                    Some(edge),
-                    best_side.map(|v| v.to_string()),
-                    MarketMode::Ladder,
-                ),
-                Some(edge) => (
-                    Some(edge),
-                    best_side.map(|v| v.to_string()),
-                    MarketMode::Hold,
+            match best {
+                Some((label, edge)) => (
+                    Some(edge.edge_bps),
+                    Some(label.to_string()),
+                    edge.mode.clone(),
                 ),
                 None => (None, None, MarketMode::NoSignal),
             }
@@ -673,6 +825,44 @@ fn build_market_row(
         mode,
         last_update_ms,
     }
+}
+
+#[derive(Clone)]
+struct EdgeDecision {
+    edge_bps: f64,
+    mode: MarketMode,
+}
+
+fn decide_edge(
+    true_prob: Option<f64>,
+    implied_mid: Option<f64>,
+    implied_vwap: Option<f64>,
+    snipe_floor_bps: f64,
+) -> Option<EdgeDecision> {
+    let true_prob = true_prob?;
+    let implied_mid = implied_mid?;
+    let edge_mid = (true_prob - implied_mid) * 10_000.0;
+    if edge_mid <= 0.0 {
+        return Some(EdgeDecision {
+            edge_bps: edge_mid,
+            mode: MarketMode::Hold,
+        });
+    }
+    if edge_mid >= snipe_floor_bps {
+        if let Some(vwap) = implied_vwap {
+            let edge_vwap = (true_prob - vwap) * 10_000.0;
+            if edge_vwap >= snipe_floor_bps {
+                return Some(EdgeDecision {
+                    edge_bps: edge_vwap,
+                    mode: MarketMode::Snipe,
+                });
+            }
+        }
+    }
+    Some(EdgeDecision {
+        edge_bps: edge_mid,
+        mode: MarketMode::Ladder,
+    })
 }
 
 fn execution_status(intent_log: &[String], order_log: &[String]) -> Option<String> {

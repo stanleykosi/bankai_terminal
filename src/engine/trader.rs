@@ -26,7 +26,7 @@ use crate::engine::types::{
     AlloraMarketUpdate, BinanceMarketUpdate, MarketUpdate, MarketWindow, TradeIntent, TradeMode,
 };
 use crate::error::{BankaiError, Result};
-use crate::storage::orderbook::OrderBookStore;
+use crate::storage::orderbook::{BookSide, OrderBookStore};
 use crate::storage::redis::RedisManager;
 
 const DEFAULT_TICK_INTERVAL: Duration = Duration::from_secs(5);
@@ -314,7 +314,7 @@ impl TradingEngine {
             &config.strategy,
             &up_fees,
         ) {
-            if let Some(intent) = result.intent {
+            if let Some(mut intent) = result.intent {
                 if up_fee_missing {
                     match result.decision {
                         TradeDecision::Snipe => {
@@ -329,6 +329,37 @@ impl TradingEngine {
                     }
                 }
                 if !(up_fee_missing && result.decision == TradeDecision::Snipe) {
+                    if result.decision == TradeDecision::Snipe {
+                        if let Some(vwap) = estimate_snipe_vwap(
+                            &self.orderbook,
+                            &self.redis,
+                            &up_token,
+                            true_up,
+                            implied_up,
+                            &config,
+                        )
+                        .await?
+                        {
+                            if let Ok(vwap_result) = analyze_opportunity(
+                                AnalysisInput {
+                                    market_id: asset_window.market_id.clone(),
+                                    asset_id: up_token.clone(),
+                                    implied_prob: vwap,
+                                    true_prob: true_up,
+                                    timestamp_ms: now,
+                                    market_window: Some(window),
+                                },
+                                &config.strategy,
+                                &up_fees,
+                            ) {
+                                if vwap_result.decision == TradeDecision::Snipe {
+                                    if let Some(vwap_intent) = vwap_result.intent {
+                                        intent = vwap_intent;
+                                    }
+                                }
+                            }
+                        }
+                    }
                     best_intent = Some(intent);
                 }
             }
@@ -347,7 +378,7 @@ impl TradingEngine {
             &config.strategy,
             &down_fees,
         ) {
-            if let Some(intent) = result.intent {
+            if let Some(mut intent) = result.intent {
                 if down_fee_missing {
                     match result.decision {
                         TradeDecision::Snipe => {
@@ -362,6 +393,37 @@ impl TradingEngine {
                     }
                 }
                 if !(down_fee_missing && result.decision == TradeDecision::Snipe) {
+                    if result.decision == TradeDecision::Snipe {
+                        if let Some(vwap) = estimate_snipe_vwap(
+                            &self.orderbook,
+                            &self.redis,
+                            &down_token,
+                            true_down,
+                            implied_down,
+                            &config,
+                        )
+                        .await?
+                        {
+                            if let Ok(vwap_result) = analyze_opportunity(
+                                AnalysisInput {
+                                    market_id: asset_window.market_id.clone(),
+                                    asset_id: down_token.clone(),
+                                    implied_prob: vwap,
+                                    true_prob: true_down,
+                                    timestamp_ms: now,
+                                    market_window: Some(window),
+                                },
+                                &config.strategy,
+                                &down_fees,
+                            ) {
+                                if vwap_result.decision == TradeDecision::Snipe {
+                                    if let Some(vwap_intent) = vwap_result.intent {
+                                        intent = vwap_intent;
+                                    }
+                                }
+                            }
+                        }
+                    }
                     let replace = match best_intent.as_ref() {
                         Some(current) => intent.edge_bps > current.edge_bps,
                         None => true,
@@ -628,6 +690,71 @@ fn fee_config_for_token(config: &Config, fee_rate_bps: Option<f64>) -> (FeeConfi
         return (fees, false);
     }
     (fees, true)
+}
+
+async fn estimate_snipe_vwap(
+    orderbook: &OrderBookStore,
+    redis: &RedisManager,
+    token_id: &str,
+    true_prob: f64,
+    mid_price: f64,
+    config: &Config,
+) -> Result<Option<f64>> {
+    if mid_price <= 0.0 {
+        return Ok(None);
+    }
+    let size = estimate_order_size(
+        redis,
+        true_prob,
+        mid_price,
+        &config.execution,
+        &config.strategy,
+    )
+    .await?;
+    let vwap = orderbook
+        .vwap_for_size(token_id, BookSide::Ask, size, 50)
+        .await?;
+    Ok(vwap.map(|value| value.avg_price))
+}
+
+async fn estimate_order_size(
+    redis: &RedisManager,
+    true_prob: f64,
+    price: f64,
+    execution: &crate::config::ExecutionConfig,
+    strategy: &crate::config::StrategyConfig,
+) -> Result<f64> {
+    let bankroll = redis.get_float("sys:bankroll:usdc").await?;
+    let odds = if price > 0.0 { 1.0 / price } else { 0.0 };
+    let kelly = calculate_kelly(true_prob, odds);
+    let target = if let Some(bankroll) = bankroll {
+        bankroll * strategy.kelly_fraction * kelly
+    } else {
+        execution.default_order_usdc
+    };
+    let mut notional = target.clamp(execution.min_order_usdc, execution.max_order_usdc);
+    if notional < execution.min_order_usdc {
+        return Err(BankaiError::InvalidArgument(
+            "order notional below min".to_string(),
+        ));
+    }
+    if notional > execution.max_order_usdc {
+        notional = execution.max_order_usdc;
+    }
+    Ok(notional / price)
+}
+
+fn calculate_kelly(win_prob: f64, odds: f64) -> f64 {
+    if win_prob <= 0.0 || win_prob >= 1.0 {
+        return 0.0;
+    }
+    if odds <= 1.0 {
+        return 0.0;
+    }
+    let payout = odds - 1.0;
+    let loss_prob = 1.0 - win_prob;
+    let kelly = (win_prob * payout - loss_prob) / payout;
+    kelly.clamp(0.0, 1.0)
 }
 
 async fn is_orderbook_stale(

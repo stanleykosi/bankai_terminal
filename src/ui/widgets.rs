@@ -298,13 +298,13 @@ fn render_markets(frame: &mut Frame, area: Rect, markets: &[MarketRow]) {
     let header = Row::new(vec![
         Cell::from("Asset"),
         Cell::from("Price"),
-        Cell::from("Imp Up"),
-        Cell::from("Start"),
+        Cell::from("Price (Up)"),
+        Cell::from("Start Price"),
         Cell::from("Sig 5m"),
         Cell::from("EV"),
         Cell::from("Side"),
         Cell::from("FeeBps"),
-        Cell::from("Mode (Signal)"),
+        Cell::from("Signal"),
         Cell::from("Age"),
     ])
     .style(

@@ -202,6 +202,12 @@ impl PolymarketRtds {
                     .await?;
             }
         }
+        if let Some(trade) = parse_last_trade_event(text)? {
+            let _ = self
+                .orderbook
+                .set_last_trade_price(&trade.asset_id, trade.price, trade.timestamp_ms)
+                .await;
+        }
         Ok(())
     }
 }
@@ -218,6 +224,13 @@ struct PriceChange {
     price: String,
     size: f64,
     side: BookSide,
+}
+
+#[derive(Debug)]
+struct LastTrade {
+    asset_id: String,
+    price: f64,
+    timestamp_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -309,6 +322,43 @@ fn parse_price_change_event(text: &str) -> Result<Option<Vec<PriceChange>>> {
     }
 
     Ok(Some(parsed_changes))
+}
+
+fn parse_last_trade_event(text: &str) -> Result<Option<LastTrade>> {
+    let parsed: Value = serde_json::from_str(text)?;
+    let event_source = if parsed.get("event_type").is_some() {
+        &parsed
+    } else if let Some(payload) = parsed.get("payload") {
+        payload
+    } else {
+        return Ok(None);
+    };
+
+    let event_type = event_source
+        .get("event_type")
+        .and_then(|value| value.as_str());
+    if event_type != Some("last_trade_price") {
+        return Ok(None);
+    }
+    let asset_id = event_source
+        .get("asset_id")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| {
+            BankaiError::InvalidArgument("last_trade_price asset_id missing".to_string())
+        })?;
+    let price = parse_string(event_source.get("price"), "last_trade_price price")?
+        .parse::<f64>()
+        .map_err(|_| {
+            BankaiError::InvalidArgument("last_trade_price price not numeric".to_string())
+        })?;
+    let timestamp_ms = parse_numeric(event_source.get("timestamp"), "last_trade_price timestamp")?
+        .round()
+        .max(0.0) as u64;
+    Ok(Some(LastTrade {
+        asset_id: asset_id.to_string(),
+        price,
+        timestamp_ms,
+    }))
 }
 
 fn parse_price_change(value: &Value, root_asset_id: Option<&str>) -> Result<PriceChange> {
