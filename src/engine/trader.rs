@@ -70,10 +70,7 @@ impl TradingEngine {
         }
     }
 
-    pub fn spawn(
-        self,
-        receiver: broadcast::Receiver<MarketUpdate>,
-    ) -> tokio::task::JoinHandle<()> {
+    pub fn spawn(self, receiver: broadcast::Receiver<MarketUpdate>) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             if let Err(error) = self.run(receiver).await {
                 tracing::error!(?error, "trading engine stopped");
@@ -109,11 +106,7 @@ impl TradingEngine {
         }
     }
 
-    async fn handle_update(
-        &self,
-        state: &mut TraderState,
-        update: MarketUpdate,
-    ) -> Result<()> {
+    async fn handle_update(&self, state: &mut TraderState, update: MarketUpdate) -> Result<()> {
         match update {
             MarketUpdate::Binance(update) => {
                 state
@@ -151,9 +144,8 @@ impl TradingEngine {
             return Ok(());
         };
 
-        let _current_price = resolve_binance_price(binance).ok_or_else(|| {
-            BankaiError::InvalidArgument("binance price missing".to_string())
-        })?;
+        let _current_price = resolve_binance_price(binance)
+            .ok_or_else(|| BankaiError::InvalidArgument("binance price missing".to_string()))?;
         let volatility = binance
             .volatility_1m
             .unwrap_or(config.execution.min_volatility)
@@ -163,24 +155,17 @@ impl TradingEngine {
             .redis
             .get_asset_window(asset)
             .await?
-            .ok_or_else(|| {
-                BankaiError::InvalidArgument("asset window missing".to_string())
-            })?;
+            .ok_or_else(|| BankaiError::InvalidArgument("asset window missing".to_string()))?;
         let window = MarketWindow {
             start_time_ms: asset_window.start_time_ms,
             end_time_ms: asset_window.end_time_ms,
         };
 
-        let Some(aligned) =
-            select_aligned_5m_signal(&state.last_allora, asset, window, now)
-        else {
+        let Some(aligned) = select_aligned_5m_signal(&state.last_allora, asset, window, now) else {
             let last = state.last_signal_miss_ms.get(asset).copied().unwrap_or(0);
             if now.saturating_sub(last) > 30_000 {
-                self.log_alert(
-                    asset,
-                    "missing aligned 10m signal; skipping window",
-                )
-                .await;
+                self.log_alert(asset, "missing aligned 10m signal; skipping window")
+                    .await;
                 state.last_signal_miss_ms.insert(asset.to_string(), now);
             }
             return Ok(());
@@ -191,18 +176,42 @@ impl TradingEngine {
             return Ok(());
         }
 
-        let Some((start_time_ms, start_price)) =
-            self.redis.get_asset_start_price(asset).await?
+        let Some((start_time_ms, start_price)) = self.redis.get_asset_start_price(asset).await?
         else {
-            self.log_alert(asset, "start price missing for active window").await;
+            let last = state
+                .last_start_price_alert_ms
+                .get(asset)
+                .copied()
+                .unwrap_or(0);
+            if now.saturating_sub(last) > 30_000 {
+                self.log_alert(asset, "start price missing for active window")
+                    .await;
+                state
+                    .last_start_price_alert_ms
+                    .insert(asset.to_string(), now);
+            }
             return Ok(());
         };
         if start_time_ms != window.start_time_ms || start_price <= 0.0 {
-            self.log_alert(asset, "start price mismatch for active window").await;
+            let last = state
+                .last_start_price_alert_ms
+                .get(asset)
+                .copied()
+                .unwrap_or(0);
+            if now.saturating_sub(last) > 30_000 {
+                self.log_alert(asset, "start price mismatch for active window")
+                    .await;
+                state
+                    .last_start_price_alert_ms
+                    .insert(asset.to_string(), now);
+            }
             return Ok(());
         }
 
-        let metadata = self.redis.get_market_metadata(&asset_window.market_id).await?;
+        let metadata = self
+            .redis
+            .get_market_metadata(&asset_window.market_id)
+            .await?;
         let up_token = metadata
             .outcome_up_token_id
             .ok_or_else(|| BankaiError::InvalidArgument("up token id missing".to_string()))?;
@@ -218,7 +227,8 @@ impl TradingEngine {
                     self.log_alert(asset, "missing fee rate for UP token").await;
                 }
                 if down_fee_bps.is_none() {
-                    self.log_alert(asset, "missing fee rate for DOWN token").await;
+                    self.log_alert(asset, "missing fee rate for DOWN token")
+                        .await;
                 }
                 state.last_fee_alert_ms.insert(asset.to_string(), now);
             }
@@ -248,26 +258,36 @@ impl TradingEngine {
         if is_orderbook_stale(&self.orderbook, &up_token, now).await? {
             self.log_alert(asset, "orderbook stale for UP token; using gamma fallback")
                 .await;
-            if let Some((up, down)) =
-                fetch_outcomes_from_gamma(&self.gamma_client, &config.endpoints.polymarket_gamma, &asset_window.market_id).await
+            if let Some((up, down)) = fetch_outcomes_from_gamma(
+                &self.gamma_client,
+                &config.endpoints.polymarket_gamma,
+                &asset_window.market_id,
+            )
+            .await
             {
                 implied_up = implied_up.or(Some(up));
                 implied_down = implied_down.or(Some(down));
             }
         }
         if is_orderbook_stale(&self.orderbook, &down_token, now).await? {
-            self.log_alert(asset, "orderbook stale for DOWN token; using gamma fallback")
-                .await;
-            if let Some((up, down)) =
-                fetch_outcomes_from_gamma(&self.gamma_client, &config.endpoints.polymarket_gamma, &asset_window.market_id).await
+            self.log_alert(
+                asset,
+                "orderbook stale for DOWN token; using gamma fallback",
+            )
+            .await;
+            if let Some((up, down)) = fetch_outcomes_from_gamma(
+                &self.gamma_client,
+                &config.endpoints.polymarket_gamma,
+                &asset_window.market_id,
+            )
+            .await
             {
                 implied_up = implied_up.or(Some(up));
                 implied_down = implied_down.or(Some(down));
             }
         }
-        let implied_up = implied_up.ok_or_else(|| {
-            BankaiError::InvalidArgument("up book mid missing".to_string())
-        })?;
+        let implied_up = implied_up
+            .ok_or_else(|| BankaiError::InvalidArgument("up book mid missing".to_string()))?;
         let implied_down = implied_down.unwrap_or_else(|| (1.0 - implied_up).max(0.0));
 
         let true_up = compute_true_probability_5m(
@@ -298,18 +318,12 @@ impl TradingEngine {
                 if up_fee_missing {
                     match result.decision {
                         TradeDecision::Snipe => {
-                            self.log_alert(
-                                asset,
-                                "fee rate missing; snipe intent blocked",
-                            )
-                            .await;
+                            self.log_alert(asset, "fee rate missing; snipe intent blocked")
+                                .await;
                         }
                         TradeDecision::Ladder => {
-                            self.log_alert(
-                                asset,
-                                "fee rate missing; ladder intent allowed",
-                            )
-                            .await;
+                            self.log_alert(asset, "fee rate missing; ladder intent allowed")
+                                .await;
                         }
                         _ => {}
                     }
@@ -337,18 +351,12 @@ impl TradingEngine {
                 if down_fee_missing {
                     match result.decision {
                         TradeDecision::Snipe => {
-                            self.log_alert(
-                                asset,
-                                "fee rate missing; snipe intent blocked",
-                            )
-                            .await;
+                            self.log_alert(asset, "fee rate missing; snipe intent blocked")
+                                .await;
                         }
                         TradeDecision::Ladder => {
-                            self.log_alert(
-                                asset,
-                                "fee rate missing; ladder intent allowed",
-                            )
-                            .await;
+                            self.log_alert(asset, "fee rate missing; ladder intent allowed")
+                                .await;
                         }
                         _ => {}
                     }
@@ -493,7 +501,10 @@ impl TradingEngine {
     }
 
     async fn position_size(&self, wallet_key: &str, token_id: &str) -> Result<f64> {
-        let tracked = self.redis.get_tracked_position(wallet_key, token_id).await?;
+        let tracked = self
+            .redis
+            .get_tracked_position(wallet_key, token_id)
+            .await?;
         if tracked > 0.0 {
             return Ok(tracked);
         }
@@ -512,6 +523,7 @@ struct TraderState {
     last_intent_ms: HashMap<String, u64>,
     last_signal_miss_ms: HashMap<String, u64>,
     last_fee_alert_ms: HashMap<String, u64>,
+    last_start_price_alert_ms: HashMap<String, u64>,
 }
 
 impl TraderState {
@@ -522,6 +534,7 @@ impl TraderState {
             last_intent_ms: HashMap::new(),
             last_signal_miss_ms: HashMap::new(),
             last_fee_alert_ms: HashMap::new(),
+            last_start_price_alert_ms: HashMap::new(),
         }
     }
 }

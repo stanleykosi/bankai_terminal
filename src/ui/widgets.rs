@@ -222,7 +222,9 @@ fn render_system_panel(
         )));
     }
 
-    let paragraph = Paragraph::new(lines).block(block).alignment(Alignment::Left);
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .alignment(Alignment::Left);
     frame.render_widget(paragraph, area);
 }
 
@@ -251,7 +253,9 @@ fn render_window_bar(frame: &mut Frame, area: Rect, windows: &[ActiveWindowRow])
             "done".to_string()
         };
         let status_style = match row.status.as_str() {
-            "ACTIVE" => Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            "ACTIVE" => Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
             "UPCOMING" => Style::default().fg(Color::Yellow),
             "PAST" => Style::default().fg(Color::DarkGray),
             _ => Style::default().fg(Color::DarkGray),
@@ -578,7 +582,10 @@ fn format_last_order_state(payload: Option<&String>) -> Option<String> {
     let value: Value = serde_json::from_str(payload).ok()?;
     let status = value.get("status")?.as_str()?.to_string();
     let id = value.get("id").and_then(|v| v.as_str()).unwrap_or("--");
-    let matched = value.get("matched_size").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let matched = value
+        .get("matched_size")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
     let original = value
         .get("original_size")
         .and_then(|v| v.as_f64())

@@ -163,9 +163,7 @@ impl OrderBookStore {
                 let bid = bid.price.parse::<f64>().ok();
                 let ask = ask.price.parse::<f64>().ok();
                 match (bid, ask) {
-                    (Some(bid), Some(ask)) if bid > 0.0 && ask > 0.0 => {
-                        Ok(Some((bid + ask) / 2.0))
-                    }
+                    (Some(bid), Some(ask)) if bid > 0.0 && ask > 0.0 => Ok(Some((bid + ask) / 2.0)),
                     _ => Ok(None),
                 }
             }

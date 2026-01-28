@@ -72,14 +72,14 @@ impl AllowanceManager {
             ));
         }
         let chain_id = read_env_u64(ENV_CHAIN_ID)?.unwrap_or(DEFAULT_CHAIN_ID);
-        let decimals = read_env_u32(ENV_COLLATERAL_DECIMALS)?.unwrap_or(DEFAULT_COLLATERAL_DECIMALS);
+        let decimals =
+            read_env_u32(ENV_COLLATERAL_DECIMALS)?.unwrap_or(DEFAULT_COLLATERAL_DECIMALS);
 
         let wallet = build_wallet(secrets, chain_id)?;
         let provider = build_provider(&rpc_url, Duration::from_millis(DEFAULT_REQUEST_TIMEOUT_MS))?;
 
         let target_allowance = config.execution.allowance_target_usdc;
-        let interval =
-            Duration::from_secs(config.execution.allowance_check_interval_secs.max(10));
+        let interval = Duration::from_secs(config.execution.allowance_check_interval_secs.max(10));
 
         Ok(Some(Self {
             provider,
@@ -152,8 +152,13 @@ impl AllowanceManager {
     async fn fetch_erc20_allowance(&self, token: Address, spender: Address) -> Result<U256> {
         let function = build_erc20_allowance()?;
         let data = function
-            .encode_input(&[Token::Address(self.wallet.address()), Token::Address(spender)])
-            .map_err(|err| BankaiError::InvalidArgument(format!("allowance encode failed: {err}")))?;
+            .encode_input(&[
+                Token::Address(self.wallet.address()),
+                Token::Address(spender),
+            ])
+            .map_err(|err| {
+                BankaiError::InvalidArgument(format!("allowance encode failed: {err}"))
+            })?;
         let tx = TransactionRequest {
             to: Some(token.into()),
             data: Some(Bytes::from(data)),
@@ -165,9 +170,9 @@ impl AllowanceManager {
             .call(&call, None)
             .await
             .map_err(|err| BankaiError::Rpc(format!("allowance call failed: {err}")))?;
-        let decoded = function
-            .decode_output(raw.as_ref())
-            .map_err(|err| BankaiError::InvalidArgument(format!("allowance decode failed: {err}")))?;
+        let decoded = function.decode_output(raw.as_ref()).map_err(|err| {
+            BankaiError::InvalidArgument(format!("allowance decode failed: {err}"))
+        })?;
         decode_u256(&decoded)
     }
 
@@ -187,7 +192,10 @@ impl AllowanceManager {
     async fn fetch_erc1155_approval(&self, token: Address, operator: Address) -> Result<bool> {
         let function = build_erc1155_is_approved()?;
         let data = function
-            .encode_input(&[Token::Address(self.wallet.address()), Token::Address(operator)])
+            .encode_input(&[
+                Token::Address(self.wallet.address()),
+                Token::Address(operator),
+            ])
             .map_err(|err| {
                 BankaiError::InvalidArgument(format!("isApprovedForAll encode failed: {err}"))
             })?;
@@ -202,11 +210,9 @@ impl AllowanceManager {
             .call(&call, None)
             .await
             .map_err(|err| BankaiError::Rpc(format!("isApprovedForAll call failed: {err}")))?;
-        let decoded = function
-            .decode_output(raw.as_ref())
-            .map_err(|err| {
-                BankaiError::InvalidArgument(format!("isApprovedForAll decode failed: {err}"))
-            })?;
+        let decoded = function.decode_output(raw.as_ref()).map_err(|err| {
+            BankaiError::InvalidArgument(format!("isApprovedForAll decode failed: {err}"))
+        })?;
         decode_bool(&decoded)
     }
 
@@ -403,7 +409,7 @@ fn build_erc1155_set_approval() -> Result<Function> {
 }
 
 fn decode_u256(tokens: &[Token]) -> Result<U256> {
-    match tokens.get(0) {
+    match tokens.first() {
         Some(Token::Uint(value)) => Ok(*value),
         _ => Err(BankaiError::InvalidArgument(
             "unexpected allowance output".to_string(),
@@ -412,7 +418,7 @@ fn decode_u256(tokens: &[Token]) -> Result<U256> {
 }
 
 fn decode_bool(tokens: &[Token]) -> Result<bool> {
-    match tokens.get(0) {
+    match tokens.first() {
         Some(Token::Bool(value)) => Ok(*value),
         _ => Err(BankaiError::InvalidArgument(
             "unexpected approval output".to_string(),

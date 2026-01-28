@@ -159,9 +159,7 @@ impl PolymarketUserWs {
                 self.apply_buy(&trade.asset_id, size, price).await?;
             }
             "sell" => {
-                let timestamp = trade
-                    .timestamp()
-                    .unwrap_or_else(current_unix_timestamp);
+                let timestamp = trade.timestamp().unwrap_or_else(current_unix_timestamp);
                 self.apply_sell(&trade.asset_id, size, price, &trade.id, timestamp)
                     .await?;
             }

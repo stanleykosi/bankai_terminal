@@ -165,8 +165,7 @@ impl PolymarketPayloadBuilder {
 
         if intent.mode == TradeMode::Snipe && fee_rate_bps > 0.0 {
             let price_curve = (4.0 * price * (1.0 - price)).clamp(0.0, 1.0);
-            let effective_fee_bps =
-                fee_rate_bps * (1.0 + (SNIPE_FEE_CURVE_ALPHA * price_curve));
+            let effective_fee_bps = fee_rate_bps * (1.0 + (SNIPE_FEE_CURVE_ALPHA * price_curve));
             let scale = (1.0 - (effective_fee_bps / SNIPE_FEE_SIZE_SCALE_DENOM_BPS))
                 .clamp(SNIPE_FEE_SIZE_MIN_SCALE, 1.0);
             size *= scale;
@@ -224,9 +223,8 @@ impl PolymarketPayloadBuilder {
                     scale = scale.min(execution.max_impact_bps / impact_bps);
                 }
                 if slippage_bps > 0.0 {
-                    let slip_scale =
-                        (1.0 - (slippage_bps / SNIPE_SLIPPAGE_SIZE_SCALE_DENOM_BPS))
-                            .clamp(SNIPE_SLIPPAGE_SIZE_MIN_SCALE, 1.0);
+                    let slip_scale = (1.0 - (slippage_bps / SNIPE_SLIPPAGE_SIZE_SCALE_DENOM_BPS))
+                        .clamp(SNIPE_SLIPPAGE_SIZE_MIN_SCALE, 1.0);
                     scale = scale.min(slip_scale);
                 }
                 if scale >= 0.999 || attempts >= 3 {
@@ -277,10 +275,17 @@ impl PolymarketPayloadBuilder {
 
         let maker_amount = to_fixed_u256(maker_amount, USDC_DECIMALS)?;
         let taker_amount = to_fixed_u256(taker_amount, USDC_DECIMALS)?;
+        let order_type = resolve_order_type(intent.mode, execution);
         let now = current_unix_timestamp();
-        let expiration = match intent.mode {
-            TradeMode::Ladder => 0u64,
-            TradeMode::Snipe => now + execution.order_expiry_secs,
+        let expiration = match order_type.as_str() {
+            "GTD" => gtd_expiration(
+                now,
+                intent.market_window.as_ref().map(|w| w.end_time_ms),
+                execution.gtd_min_expiry_secs,
+                execution.order_expiry_secs,
+            ),
+            "GTC" => 0u64,
+            _ => now + execution.order_expiry_secs,
         };
         let order = OrderSignaturePayload {
             salt: U256::from(now_ms()?),
@@ -297,7 +302,9 @@ impl PolymarketPayloadBuilder {
             signature_type: 0,
         };
 
-        let typed_data = self.signer.order_typed_data(&order, self.exchange_address)?;
+        let typed_data = self
+            .signer
+            .order_typed_data(&order, self.exchange_address)?;
         let signature = self.signer.sign_typed_data(&typed_data).await?;
         let signature_hex = signature.to_string();
 
@@ -309,11 +316,7 @@ impl PolymarketPayloadBuilder {
             taker_amount,
             order,
             signature: signature_hex,
-            order_type: match intent.mode {
-                TradeMode::Ladder => "GTC",
-                TradeMode::Snipe => "FOK",
-            }
-            .to_string(),
+            order_type,
             fee_rate_bps,
             best_bid: book.best_bid,
             best_ask: book.best_ask,
@@ -346,16 +349,22 @@ impl ExecutionPayloadBuilder for PolymarketPayloadBuilder {
             "owner": self.api_key.clone(),
             "orderType": order.order_type,
         });
+        let relayer_payload = if intent.mode == TradeMode::Ladder
+            && self.config.load_full().execution.post_only_ladder
+        {
+            let mut payload = relayer_payload;
+            if let Some(map) = payload.as_object_mut() {
+                map.insert("postOnly".to_string(), json!(true));
+            }
+            payload
+        } else {
+            relayer_payload
+        };
 
         let body = serde_json::to_string(&relayer_payload)?;
         let timestamp = current_unix_timestamp();
-        let signature = build_hmac_signature(
-            &self.api_secret,
-            timestamp,
-            "POST",
-            &self.order_path,
-            &body,
-        )?;
+        let signature =
+            build_hmac_signature(&self.api_secret, timestamp, "POST", &self.order_path, &body)?;
         let auth = RelayerAuth {
             address: format!("{}", self.signer.address()),
             api_key: self.api_key.clone(),
@@ -514,9 +523,7 @@ fn to_fixed_u256(value: f64, decimals: u32) -> Result<U256> {
 fn parse_token_id(token_id: &str) -> Result<U256> {
     let trimmed = token_id.trim();
     if trimmed.is_empty() {
-        return Err(BankaiError::InvalidArgument(
-            "token id missing".to_string(),
-        ));
+        return Err(BankaiError::InvalidArgument("token id missing".to_string()));
     }
     U256::from_dec_str(trimmed)
         .map_err(|_| BankaiError::InvalidArgument("token id not numeric".to_string()))
@@ -528,6 +535,34 @@ fn estimate_fee_paid(fee_rate_bps: f64, price: f64, size: f64) -> f64 {
     }
     let notional = price * size;
     notional * (fee_rate_bps / 10_000.0)
+}
+
+fn resolve_order_type(mode: TradeMode, execution: &crate::config::ExecutionConfig) -> String {
+    let ladder = execution.ladder_order_type.trim().to_ascii_uppercase();
+    let snipe = execution.snipe_order_type.trim().to_ascii_uppercase();
+    match mode {
+        TradeMode::Ladder => match ladder.as_str() {
+            "GTD" | "GTC" => ladder,
+            _ => "GTD".to_string(),
+        },
+        TradeMode::Snipe => match snipe.as_str() {
+            "FOK" | "FAK" => snipe,
+            _ => "FOK".to_string(),
+        },
+    }
+}
+
+fn gtd_expiration(
+    now_secs: u64,
+    window_end_ms: Option<u64>,
+    min_expiry_secs: u64,
+    fallback_secs: u64,
+) -> u64 {
+    let target_secs = window_end_ms
+        .map(|value| value / 1000)
+        .unwrap_or_else(|| now_secs + fallback_secs);
+    let min_secs = now_secs + min_expiry_secs;
+    target_secs.max(min_secs)
 }
 
 fn now_ms() -> Result<u64> {
@@ -564,4 +599,25 @@ fn build_hmac_signature(
     let result = mac.finalize().into_bytes();
     let signature = general_purpose::STANDARD.encode(result);
     Ok(signature.replace('+', "-").replace('/', "_"))
+}
+
+#[cfg(test)]
+mod tests_end {
+    use super::*;
+    use crate::config::ExecutionConfig;
+
+    #[test]
+    fn test_gtd_expiration_respects_minimum() {
+        let now = 1_000u64;
+        let window_end_ms = Some((now + 10) * 1000);
+        let expiration = gtd_expiration(now, window_end_ms, 60, 30);
+        assert_eq!(expiration, now + 60);
+    }
+
+    #[test]
+    fn test_resolve_order_type_defaults() {
+        let execution = ExecutionConfig::default();
+        assert_eq!(resolve_order_type(TradeMode::Ladder, &execution), "GTD");
+        assert_eq!(resolve_order_type(TradeMode::Snipe, &execution), "FOK");
+    }
 }

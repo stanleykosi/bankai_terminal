@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 /**
  * @description
  * CLI utility to capture credentials and write an encrypted secrets.enc file.

@@ -1,3 +1,14 @@
+#![allow(
+    clippy::large_enum_variant,
+    clippy::manual_ignore_case_cmp,
+    clippy::new_without_default,
+    clippy::result_large_err,
+    clippy::single_match,
+    clippy::too_many_arguments,
+    clippy::uninlined_format_args,
+    clippy::vec_init_then_push
+)]
+
 pub mod accounting;
 /**
  * @description

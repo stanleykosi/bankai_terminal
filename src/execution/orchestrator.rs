@@ -19,6 +19,7 @@ use tokio::sync::mpsc;
 
 use crate::engine::types::{TradeIntent, TradeMode, TradeSide};
 use crate::error::{BankaiError, Result};
+use crate::execution::cancel::CancelClient;
 use crate::execution::direct::{DirectExecutionClient, DirectExecutionResult, FillOrdersRequest};
 use crate::execution::nonce::NonceManager;
 use crate::execution::relayer::{
@@ -29,6 +30,7 @@ use crate::storage::redis::RedisManager;
 use crate::telemetry::metrics;
 use chrono::Utc;
 use chrono_tz::America::New_York;
+use sha2::{Digest, Sha256};
 
 const DEFAULT_RELAYER_TIMEOUT_MS: u64 = 500;
 const ORDER_LOG_LIMIT: usize = 20;
@@ -37,6 +39,11 @@ const ORDER_LOG_LIMIT: usize = 20;
 pub struct ExecutionOrchestratorConfig {
     pub relayer_timeout: Duration,
     pub prefer_ws_reconcile: bool,
+    pub max_retries: u32,
+    pub backoff_ms: u64,
+    pub backoff_max_ms: u64,
+    pub idempotency_ttl_secs: u64,
+    pub cancel_before_replace: bool,
 }
 
 impl Default for ExecutionOrchestratorConfig {
@@ -44,6 +51,11 @@ impl Default for ExecutionOrchestratorConfig {
         Self {
             relayer_timeout: Duration::from_millis(DEFAULT_RELAYER_TIMEOUT_MS),
             prefer_ws_reconcile: true,
+            max_retries: 2,
+            backoff_ms: 50,
+            backoff_max_ms: 500,
+            idempotency_ttl_secs: 30,
+            cancel_before_replace: true,
         }
     }
 }
@@ -92,6 +104,7 @@ pub struct ExecutionOrchestrator {
     config: ExecutionOrchestratorConfig,
     relayer: RelayerClient,
     direct: Option<DirectExecutionClient>,
+    cancel_client: Option<CancelClient>,
     database: Option<DatabaseManager>,
     nonce_manager: Option<NonceManager>,
     activity_redis: Option<RedisManager>,
@@ -104,6 +117,7 @@ impl ExecutionOrchestrator {
         config: ExecutionOrchestratorConfig,
         relayer: RelayerClient,
         direct: Option<DirectExecutionClient>,
+        cancel_client: Option<CancelClient>,
         database: Option<DatabaseManager>,
         nonce_manager: Option<NonceManager>,
         activity_redis: Option<RedisManager>,
@@ -125,6 +139,7 @@ impl ExecutionOrchestrator {
             config,
             relayer,
             direct,
+            cancel_client,
             database,
             nonce_manager,
             activity_redis,
@@ -158,7 +173,49 @@ impl ExecutionOrchestrator {
             }
         }
 
+        if intent.mode == TradeMode::Ladder && self.config.cancel_before_replace {
+            if let Some(client) = self.cancel_client.as_ref() {
+                match client
+                    .cancel_market_orders(&intent.market_id, &intent.asset_id)
+                    .await
+                {
+                    Ok(response) => {
+                        self.log_activity_event(format!(
+                            "[CANCEL] ok market={} asset={} cancelled={}",
+                            intent.market_id,
+                            intent.asset_id,
+                            response.canceled.len()
+                        ))
+                        .await;
+                    }
+                    Err(error) => {
+                        self.log_activity_event(format!(
+                            "[CANCEL] fail market={} asset={} error={:?}",
+                            intent.market_id, intent.asset_id, error
+                        ))
+                        .await;
+                    }
+                }
+            }
+        }
+
         let payloads = self.builder.build_payloads(&intent).await?;
+        if let Some(redis) = self.activity_redis.as_ref() {
+            let fingerprint = fingerprint_payload(&payloads.relayer_payload)?;
+            let key = format!("orders:idempotency:{fingerprint}");
+            if !redis
+                .set_if_absent(&key, "1", self.config.idempotency_ttl_secs)
+                .await?
+            {
+                self.log_activity_event(format!(
+                    "[RELAYER] skip duplicate market={} mode={}",
+                    intent.market_id,
+                    trade_mode_label(intent.mode)
+                ))
+                .await;
+                return Ok(());
+            }
+        }
         let report = self.execute_intent(&intent, &payloads).await?;
         self.persist_report(&intent, &payloads, &report).await?;
 
@@ -194,18 +251,33 @@ impl ExecutionOrchestrator {
             intent.edge_bps
         ))
         .await;
-        let relayer_result = self.execute_relayer(payloads).await;
+        let relayer_result = self.execute_relayer_with_retry(payloads).await;
 
         match relayer_result {
             Ok(response) => {
+                if let (Some(redis), Some(wallet_key)) =
+                    (self.activity_redis.as_ref(), self.wallet_key.as_ref())
+                {
+                    if let Some(order_id) = extract_order_id(&response.body) {
+                        let payload = serde_json::json!({
+                            "id": order_id,
+                            "status": "SENT",
+                            "market_id": intent.market_id,
+                            "asset_id": intent.asset_id,
+                            "side": trade_side_label(intent.side),
+                        });
+                        if let Ok(json) = serde_json::to_string(&payload) {
+                            let now = now_ms().unwrap_or(0);
+                            let _ = redis
+                                .set_order_state(wallet_key, &order_id, &json, now)
+                                .await;
+                        }
+                    }
+                }
                 self.log_activity_event(format!(
                     "[RELAYER] ok market={} request_id={}",
                     intent.market_id,
-                    response
-                        .request_id
-                        .as_ref()
-                        .map(|id| id.as_str())
-                        .unwrap_or("n/a")
+                    response.request_id.as_deref().unwrap_or("n/a")
                 ))
                 .await;
                 metadata.insert("relayer".to_string(), relayer_success_metadata(&response));
@@ -221,9 +293,8 @@ impl ExecutionOrchestrator {
             }
             Err(error) => {
                 self.log_activity_event(format!(
-                    "[RELAYER] fail market={} error={}",
-                    intent.market_id,
-                    format!("{:?}", error)
+                    "[RELAYER] fail market={} error={:?}",
+                    intent.market_id, error
                 ))
                 .await;
                 metadata.insert("relayer".to_string(), relayer_error_metadata(&error));
@@ -234,7 +305,8 @@ impl ExecutionOrchestrator {
 
                         match direct_result {
                             Ok(result) => {
-                                metadata.insert("direct".to_string(), direct_success_metadata(&result));
+                                metadata
+                                    .insert("direct".to_string(), direct_success_metadata(&result));
                                 return Ok(ExecutionReport {
                                     success: true,
                                     rail: ExecutionRail::Direct,
@@ -298,6 +370,38 @@ impl ExecutionOrchestrator {
                 body: None,
                 latency_ms: Some(duration_to_ms(timeout)),
             }),
+        }
+    }
+
+    async fn execute_relayer_with_retry(
+        &self,
+        payloads: &ExecutionPayloads,
+    ) -> std::result::Result<RelayerResponse, RelayerError> {
+        let mut attempt = 0u32;
+        loop {
+            let result = self.execute_relayer(payloads).await;
+            match result {
+                Ok(response) => return Ok(response),
+                Err(error) => {
+                    if !should_retry(&error) || attempt >= self.config.max_retries {
+                        return Err(error);
+                    }
+                    let delay = backoff_delay_ms(
+                        self.config.backoff_ms,
+                        self.config.backoff_max_ms,
+                        attempt,
+                    );
+                    self.log_activity_event(format!(
+                        "[RELAYER] retry attempt={} delay_ms={} error={:?}",
+                        attempt + 1,
+                        delay,
+                        error
+                    ))
+                    .await;
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                    attempt += 1;
+                }
+            }
         }
     }
 
@@ -545,6 +649,43 @@ fn duration_to_ms(duration: Duration) -> u64 {
     } else {
         ms as u64
     }
+}
+
+fn should_retry(error: &RelayerError) -> bool {
+    matches!(
+        error.kind,
+        RelayerErrorKind::Timeout
+            | RelayerErrorKind::Transport
+            | RelayerErrorKind::Congestion
+            | RelayerErrorKind::Server
+    )
+}
+
+fn backoff_delay_ms(base_ms: u64, max_ms: u64, attempt: u32) -> u64 {
+    let exp = 2u64.saturating_pow(attempt.min(16));
+    let base = base_ms.saturating_mul(exp);
+    let jitter = (now_ms().unwrap_or(0) % (base_ms.max(1))) as u64;
+    base.saturating_add(jitter).min(max_ms.max(base_ms))
+}
+
+fn fingerprint_payload(payload: &Value) -> Result<String> {
+    let body = serde_json::to_string(payload)?;
+    let mut hasher = Sha256::new();
+    hasher.update(body.as_bytes());
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn extract_order_id(body: &Value) -> Option<String> {
+    if let Some(id) = body.get("orderId").and_then(|v| v.as_str()) {
+        return Some(id.to_string());
+    }
+    if let Some(id) = body.get("orderID").and_then(|v| v.as_str()) {
+        return Some(id.to_string());
+    }
+    if let Some(id) = body.get("id").and_then(|v| v.as_str()) {
+        return Some(id.to_string());
+    }
+    None
 }
 
 fn is_within_window(timestamp_ms: u64, window: crate::engine::types::MarketWindow) -> bool {

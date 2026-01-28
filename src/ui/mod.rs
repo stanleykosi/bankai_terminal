@@ -28,9 +28,7 @@ use crate::accounting::keys::PNL_24H_KEY;
 use crate::config::Config;
 use crate::engine::analysis::snipe_threshold_bps;
 use crate::engine::risk::{HaltReason, RiskState};
-use crate::engine::types::{
-    AlloraMarketUpdate, BinanceMarketUpdate, MarketUpdate, MarketWindow,
-};
+use crate::engine::types::{AlloraMarketUpdate, BinanceMarketUpdate, MarketUpdate, MarketWindow};
 use crate::error::Result;
 use crate::storage::orderbook::OrderBookStore;
 use crate::storage::redis::RedisManager;
@@ -324,7 +322,9 @@ async fn snapshot_loop(
     let mut last_order_state: Option<String> = None;
     let mut binance_window_anchor = false;
     let mut active_windows: Vec<ActiveWindowRow> = Vec::new();
-    let orderbook = redis.as_ref().map(|manager| OrderBookStore::new(manager.clone()));
+    let orderbook = redis
+        .as_ref()
+        .map(|manager| OrderBookStore::new(manager.clone()));
 
     loop {
         tokio::select! {
@@ -586,7 +586,9 @@ fn build_market_row(
     let last_update_ms = snapshot.last_binance_ms.max(snapshot.last_allora_ms);
 
     let implied_up = snapshot.implied_up;
-    let implied_down = snapshot.implied_down.or_else(|| implied_up.map(|v| (1.0 - v).max(0.0)));
+    let implied_down = snapshot
+        .implied_down
+        .or_else(|| implied_up.map(|v| (1.0 - v).max(0.0)));
 
     let alignment = alignment_factor(snapshot, now_ms);
     let volatility_1m = snapshot
@@ -595,8 +597,7 @@ fn build_market_row(
         .max(config.execution.min_volatility);
 
     let true_up = match (snapshot.start_price, snapshot.inference_5m, alignment) {
-        (Some(start_price), Some(predicted), Some(alignment)) => Some(
-            compute_true_probability_5m(
+        (Some(start_price), Some(predicted), Some(alignment)) => Some(compute_true_probability_5m(
             start_price,
             predicted,
             volatility_1m,
@@ -685,7 +686,10 @@ fn execution_status(intent_log: &[String], order_log: &[String]) -> Option<Strin
 }
 
 fn count_orders(entries: &[String], needle: &str) -> usize {
-    entries.iter().filter(|entry| entry.contains(needle)).count()
+    entries
+        .iter()
+        .filter(|entry| entry.contains(needle))
+        .count()
 }
 
 fn open_orders_key(wallet_key: &str) -> String {
@@ -883,7 +887,6 @@ fn compute_true_probability_5m(
     let offset = (z * scale).tanh() * max_offset * alignment;
     (0.5 + offset).clamp(0.01, 0.99)
 }
-
 
 fn is_polymarket_online(last_refresh: Option<Instant>) -> bool {
     last_refresh

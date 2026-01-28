@@ -207,7 +207,9 @@ impl ReconnectBackoff {
 
     fn next_delay(&mut self) -> Result<Duration> {
         self.attempts = self.attempts.saturating_add(1);
-        let exp = self.base_ms.saturating_mul(2u64.saturating_pow(self.attempts.min(6)));
+        let exp = self
+            .base_ms
+            .saturating_mul(2u64.saturating_pow(self.attempts.min(6)));
         let capped = exp.min(self.max_ms);
         let jitter = compute_jitter(1_000)?;
         Ok(Duration::from_millis(capped).saturating_add(jitter))

@@ -260,11 +260,7 @@ impl RedisManager {
         Ok(())
     }
 
-    pub async fn prune_asset_window_cache(
-        &self,
-        asset: &str,
-        cutoff_ms: u64,
-    ) -> Result<usize> {
+    pub async fn prune_asset_window_cache(&self, asset: &str, cutoff_ms: u64) -> Result<usize> {
         if cutoff_ms == 0 {
             return Ok(0);
         }
@@ -281,7 +277,9 @@ impl RedisManager {
 
     pub async fn get_asset_window(&self, asset: &str) -> Result<Option<AssetWindow>> {
         let now = now_ms().unwrap_or(0);
-        let current = self.read_asset_window(asset_window_key(asset).as_str()).await?;
+        let current = self
+            .read_asset_window(asset_window_key(asset).as_str())
+            .await?;
         if let Some(window) = current {
             if now < window.end_time_ms {
                 return Ok(Some(window));
@@ -375,12 +373,12 @@ impl RedisManager {
         let start_time_ms = self.hget_i64(&key, "startTimeMs").await?;
         let end_time_ms = self.hget_i64(&key, "endTimeMs").await?;
         match (start_time_ms, end_time_ms) {
-            (Some(start), Some(end)) if start > 0 && end > 0 && end > start => Ok(Some(
-                MarketWindow {
+            (Some(start), Some(end)) if start > 0 && end > 0 && end > start => {
+                Ok(Some(MarketWindow {
                     start_time_ms: start as u64,
                     end_time_ms: end as u64,
-                },
-            )),
+                }))
+            }
             _ => Ok(None),
         }
     }
@@ -438,11 +436,7 @@ impl RedisManager {
         self.hget_string(&key, "marketId").await
     }
 
-    pub async fn set_orderbook_update_ms(
-        &self,
-        token_id: &str,
-        updated_at_ms: u64,
-    ) -> Result<()> {
+    pub async fn set_orderbook_update_ms(&self, token_id: &str, updated_at_ms: u64) -> Result<()> {
         let key = orderbook_ts_key(token_id);
         let mut conn = self.connection.clone();
         conn.hset::<_, _, _, ()>(key.as_str(), "updatedAtMs", updated_at_ms as i64)
@@ -529,6 +523,20 @@ impl RedisManager {
         Ok(())
     }
 
+    pub async fn set_if_absent(&self, key: &str, value: &str, ttl_secs: u64) -> Result<bool> {
+        let mut conn = self.connection.clone();
+        let ttl = ttl_secs.max(1);
+        let result: Option<String> = redis::cmd("SET")
+            .arg(key)
+            .arg(value)
+            .arg("NX")
+            .arg("EX")
+            .arg(ttl)
+            .query_async(&mut conn)
+            .await?;
+        Ok(result.is_some())
+    }
+
     pub async fn set_order_state(
         &self,
         wallet_key: &str,
@@ -543,12 +551,8 @@ impl RedisManager {
             .await?;
         conn.hset::<_, _, _, ()>(last_key.as_str(), "payload", payload)
             .await?;
-        conn.hset::<_, _, _, ()>(
-            last_key.as_str(),
-            "updatedAtMs",
-            updated_at_ms as i64,
-        )
-        .await?;
+        conn.hset::<_, _, _, ()>(last_key.as_str(), "updatedAtMs", updated_at_ms as i64)
+            .await?;
         Ok(())
     }
 
@@ -620,12 +624,7 @@ impl RedisManager {
         self.hget_float(&key, asset_id).await
     }
 
-    pub async fn set_peak_price(
-        &self,
-        wallet_key: &str,
-        asset_id: &str,
-        price: f64,
-    ) -> Result<()> {
+    pub async fn set_peak_price(&self, wallet_key: &str, asset_id: &str, price: f64) -> Result<()> {
         let key = peak_price_key(wallet_key);
         let mut conn = self.connection.clone();
         if price <= 0.0 {

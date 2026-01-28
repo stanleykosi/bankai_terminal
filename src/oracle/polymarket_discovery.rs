@@ -11,7 +11,9 @@
  * - Stores feeRateBps, minTickSize, and 15m time windows in Redis for eligible markets.
  */
 use chrono::offset::LocalResult;
-use chrono::{Datelike, Duration as ChronoDuration, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
+use chrono::{
+    Datelike, Duration as ChronoDuration, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc,
+};
 use chrono_tz::America::New_York;
 use regex::Regex;
 use reqwest::Client;
@@ -96,8 +98,7 @@ impl PolymarketDiscovery {
     async fn refresh_markets(&mut self) -> Result<()> {
         let mut scanned = 0usize;
         let mut accepted = 0usize;
-        let mut windows_by_asset: HashMap<AssetSymbol, Vec<MarketCandidate>> =
-            HashMap::new();
+        let mut windows_by_asset: HashMap<AssetSymbol, Vec<MarketCandidate>> = HashMap::new();
 
         let now_ms = now_ms().unwrap_or(0);
         for tag in TARGET_TAGS {
@@ -171,15 +172,14 @@ impl PolymarketDiscovery {
                                     metadata.start_time_ms,
                                 )
                                 .await;
-                            windows_by_asset
-                                .entry(asset_symbol)
-                                .or_default()
-                                .push(MarketCandidate {
+                            windows_by_asset.entry(asset_symbol).or_default().push(
+                                MarketCandidate {
                                     window: time_window,
                                     market_id: metadata.market_id.clone(),
                                     label: label.clone(),
                                     asset_ids: vec![outcome_tokens.up, outcome_tokens.down],
-                                });
+                                },
+                            );
                             self.log_market_if_new(
                                 &metadata.market_id,
                                 asset_symbol,
@@ -324,8 +324,7 @@ impl PolymarketDiscovery {
     ) {
         let now_ms = now_ms().unwrap_or(0);
         for (asset, windows) in windows_by_asset {
-            let (active, first_upcoming, second_upcoming) =
-                pick_asset_windows(now_ms, &windows);
+            let (active, first_upcoming, second_upcoming) = pick_asset_windows(now_ms, &windows);
             let candidate = active.clone().or(first_upcoming.clone());
             let Some(candidate) = candidate else {
                 let prefix = log_prefix();
@@ -511,7 +510,10 @@ fn is_target_market(market: &Value) -> Option<MarketTimeWindow> {
     }
 
     // 2. Title/Question Check
-    let question = market.get("question").and_then(|v| v.as_str()).unwrap_or("");
+    let question = market
+        .get("question")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let title = market.get("title").and_then(|v| v.as_str()).unwrap_or("");
     let lower_q = question.to_ascii_lowercase();
     let lower_title = title.to_ascii_lowercase();
@@ -559,7 +561,10 @@ fn target_asset(market: &Value) -> Option<AssetSymbol> {
         return Some(asset);
     }
 
-    let question = market.get("question").and_then(|v| v.as_str()).unwrap_or("");
+    let question = market
+        .get("question")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let title = market.get("title").and_then(|v| v.as_str()).unwrap_or("");
     asset_from_text(question).or_else(|| asset_from_text(title))
 }
@@ -602,7 +607,10 @@ fn asset_from_text(text: &str) -> Option<AssetSymbol> {
 }
 
 fn market_label(market: &Value) -> String {
-    let question = market.get("question").and_then(|v| v.as_str()).unwrap_or("");
+    let question = market
+        .get("question")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     if !question.is_empty() {
         return question.to_string();
     }
@@ -635,7 +643,11 @@ fn matches_up_down(arr: &[Value]) -> bool {
 
 fn extract_time_window(market: &Value, title: &str, question: &str) -> Option<MarketTimeWindow> {
     let slug_window = parse_slug_time_window(market)?;
-    let reference_et = New_York.from_utc_datetime(&Utc.timestamp_millis_opt(slug_window.start_time_ms as i64).single()?.naive_utc());
+    let reference_et = New_York.from_utc_datetime(
+        &Utc.timestamp_millis_opt(slug_window.start_time_ms as i64)
+            .single()?
+            .naive_utc(),
+    );
     let parsed_window = parse_time_window_from_text(title, reference_et)
         .or_else(|| parse_time_window_from_text(question, reference_et));
 
@@ -996,7 +1008,9 @@ fn log_prefix() -> String {
 }
 
 fn format_window_et(window: &MarketTimeWindow) -> String {
-    let start = Utc.timestamp_millis_opt(window.start_time_ms as i64).single();
+    let start = Utc
+        .timestamp_millis_opt(window.start_time_ms as i64)
+        .single();
     let end = Utc.timestamp_millis_opt(window.end_time_ms as i64).single();
     match (start, end) {
         (Some(start), Some(end)) => {
@@ -1036,7 +1050,7 @@ fn pick_asset_windows(
     }
 
     upcoming.sort_by_key(|candidate| candidate.window.start_time_ms);
-    let first_upcoming = upcoming.get(0).copied().cloned();
+    let first_upcoming = upcoming.first().copied().cloned();
     let second_upcoming = upcoming.get(1).copied().cloned();
 
     (active.cloned(), first_upcoming, second_upcoming)

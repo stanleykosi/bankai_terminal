@@ -40,11 +40,9 @@ pub async fn record_realized_pnl_event(
 ) -> Result<f64> {
     let key = realized_events_key(wallet);
     let member = format!("{trade_id}|{pnl}");
-    let _ = redis.zadd(&key, timestamp as f64, &member).await?;
+    redis.zadd(&key, timestamp as f64, &member).await?;
     let cutoff = timestamp.saturating_sub(REALIZED_EVENT_TTL_SECS as u64);
-    let _ = redis
-        .zremrangebyscore(&key, 0.0, cutoff as f64)
-        .await?;
+    let _ = redis.zremrangebyscore(&key, 0.0, cutoff as f64).await?;
 
     let window_start = timestamp.saturating_sub(WINDOW_24H_SECS);
     let entries = redis

@@ -1,4 +1,3 @@
-pub mod direct;
 /**
  * @purpose
  * Execution rail modules for signing and nonce coordination.
@@ -10,6 +9,8 @@ pub mod direct;
  * - Keep execution helpers focused on signing and chain state.
  */
 pub mod allowances;
+pub mod cancel;
+pub mod direct;
 pub mod nonce;
 pub mod orchestrator;
 pub mod payload_builder;

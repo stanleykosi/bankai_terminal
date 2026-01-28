@@ -94,8 +94,8 @@ impl TradeReconciler {
         let signer = Eip712Signer::from_secrets(secrets, chain_id)?;
         let wallet_key = format!("{}", signer.address()).to_ascii_lowercase();
 
-        let trades_path = read_env_value(ENV_TRADES_PATH)
-            .unwrap_or_else(|| DEFAULT_TRADES_PATH.to_string());
+        let trades_path =
+            read_env_value(ENV_TRADES_PATH).unwrap_or_else(|| DEFAULT_TRADES_PATH.to_string());
         let limit = read_env_usize(ENV_TRADES_LIMIT)?.unwrap_or(DEFAULT_TRADES_LIMIT);
 
         let client = Client::builder()
@@ -139,9 +139,13 @@ impl TradeReconciler {
 
     async fn reconcile(&self) -> Result<()> {
         let after = current_unix_timestamp().saturating_sub(DEFAULT_LOOKBACK_SECS);
-        let mut trades = self.fetch_trades(Some(&self.wallet_key), None, after).await?;
+        let mut trades = self
+            .fetch_trades(Some(&self.wallet_key), None, after)
+            .await?;
         if trades.is_empty() {
-            trades = self.fetch_trades(None, Some(&self.wallet_key), after).await?;
+            trades = self
+                .fetch_trades(None, Some(&self.wallet_key), after)
+                .await?;
         }
 
         if trades.is_empty() {
@@ -171,14 +175,18 @@ impl TradeReconciler {
             }
             mark_seen_trade(&self.redis, &self.wallet_key, &trade.id).await?;
 
-            match trade.side.as_deref().unwrap_or("").to_ascii_lowercase().as_str() {
+            match trade
+                .side
+                .as_deref()
+                .unwrap_or("")
+                .to_ascii_lowercase()
+                .as_str()
+            {
                 "buy" => {
                     self.apply_buy(&asset_id, size, price).await?;
                 }
                 "sell" => {
-                    let timestamp = trade
-                        .timestamp()
-                        .unwrap_or_else(current_unix_timestamp);
+                    let timestamp = trade.timestamp().unwrap_or_else(current_unix_timestamp);
                     self.apply_sell(&asset_id, size, price, &trade.id, timestamp)
                         .await?;
                 }
@@ -187,7 +195,10 @@ impl TradeReconciler {
 
             let message = format!(
                 "[TRADE] {} {} size={:.4} price={:.4}",
-                trade.side.unwrap_or_else(|| "UNKNOWN".to_string()).to_uppercase(),
+                trade
+                    .side
+                    .unwrap_or_else(|| "UNKNOWN".to_string())
+                    .to_uppercase(),
                 asset_id,
                 size,
                 price
@@ -269,9 +280,14 @@ impl TradeReconciler {
         if entry > 0.0 {
             let realized = (price - entry) * size;
             let _ = self.redis.incr_float(REALIZED_PNL_KEY, realized).await?;
-            let _ =
-                record_realized_pnl_event(&self.redis, &self.wallet_key, trade_id, timestamp, realized)
-                    .await;
+            let _ = record_realized_pnl_event(
+                &self.redis,
+                &self.wallet_key,
+                trade_id,
+                timestamp,
+                realized,
+            )
+            .await;
         }
         Ok(())
     }
@@ -350,7 +366,11 @@ struct TradeSnapshot {
 impl TradeSnapshot {
     fn is_confirmed(&self) -> bool {
         matches!(
-            self.status.as_deref().unwrap_or("").to_ascii_uppercase().as_str(),
+            self.status
+                .as_deref()
+                .unwrap_or("")
+                .to_ascii_uppercase()
+                .as_str(),
             "CONFIRMED"
         )
     }

@@ -1,3 +1,8 @@
+use crate::config::Config;
+use crate::error::{BankaiError, Result};
+use crate::execution::signer::Eip712Signer;
+use crate::security::Secrets;
+use crate::storage::redis::RedisManager;
 /**
  * @purpose
  * Periodically refresh open orders from Polymarket CLOB and sync to Redis.
@@ -15,11 +20,6 @@ use reqwest::{Client, Url};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use crate::config::Config;
-use crate::error::{BankaiError, Result};
-use crate::execution::signer::Eip712Signer;
-use crate::security::Secrets;
-use crate::storage::redis::RedisManager;
 
 type HmacSha256 = Hmac<sha2::Sha256>;
 
@@ -111,7 +111,10 @@ impl OpenOrdersRefresher {
             interval: Duration::from_secs(DEFAULT_REFRESH_SECS),
             limit,
             auto_cancel: config.execution.auto_cancel_orders,
-            cancel_grace_ms: config.execution.order_cancel_grace_secs.saturating_mul(1000),
+            cancel_grace_ms: config
+                .execution
+                .order_cancel_grace_secs
+                .saturating_mul(1000),
             order_expiry_secs: config.execution.order_expiry_secs,
             redis,
         }))
@@ -145,9 +148,8 @@ impl OpenOrdersRefresher {
     }
 
     async fn fetch_open_orders(&self, asset_id: Option<&str>) -> Result<Vec<OpenOrderSnapshot>> {
-        let mut url = Url::parse(&self.base_url).map_err(|err| {
-            BankaiError::InvalidArgument(format!("invalid base url: {err}"))
-        })?;
+        let mut url = Url::parse(&self.base_url)
+            .map_err(|err| BankaiError::InvalidArgument(format!("invalid base url: {err}")))?;
         url.set_path(self.orders_path.trim_start_matches('/'));
         {
             let mut pairs = url.query_pairs_mut();
@@ -207,13 +209,11 @@ impl OpenOrdersRefresher {
                 Some(value) => value,
                 None => continue,
             };
-            let expiry_ms = order
-                .expiration_ms()
-                .or_else(|| {
-                    order
-                        .created_at_ms()
-                        .map(|created| created.saturating_add(self.order_expiry_secs * 1000))
-                });
+            let expiry_ms = order.expiration_ms().or_else(|| {
+                order
+                    .created_at_ms()
+                    .map(|created| created.saturating_add(self.order_expiry_secs * 1000))
+            });
             if now_ms <= end_time_ms.saturating_add(self.cancel_grace_ms) {
                 if let Some(expiry_ms) = expiry_ms {
                     if now_ms <= expiry_ms.saturating_add(self.cancel_grace_ms) {
@@ -232,9 +232,8 @@ impl OpenOrdersRefresher {
         if order_id.trim().is_empty() {
             return Ok(());
         }
-        let mut url = Url::parse(&self.base_url).map_err(|err| {
-            BankaiError::InvalidArgument(format!("invalid base url: {err}"))
-        })?;
+        let mut url = Url::parse(&self.base_url)
+            .map_err(|err| BankaiError::InvalidArgument(format!("invalid base url: {err}")))?;
         url.set_path(self.cancel_order_path.trim_start_matches('/'));
         let body = serde_json::json!({ "orderID": order_id }).to_string();
         let path = build_request_path(&url);
@@ -280,7 +279,12 @@ struct OpenOrderSnapshot {
     pub status: Option<String>,
     #[serde(default, alias = "expiration", alias = "expirationTime")]
     pub expiration: Option<String>,
-    #[serde(default, alias = "created_at", alias = "createdAt", alias = "timestamp")]
+    #[serde(
+        default,
+        alias = "created_at",
+        alias = "createdAt",
+        alias = "timestamp"
+    )]
     pub created_at: Option<String>,
 }
 

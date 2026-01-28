@@ -1,3 +1,16 @@
+#![allow(
+    clippy::large_enum_variant,
+    clippy::manual_ignore_case_cmp,
+    clippy::new_without_default,
+    clippy::result_large_err,
+    clippy::single_match,
+    clippy::too_many_arguments,
+    clippy::uninlined_format_args,
+    clippy::vec_init_then_push
+)]
+
+use arc_swap::ArcSwap;
+use bankai_terminal::accounting::open_orders_refresh::OpenOrdersRefresher;
 /**
  * @purpose
  * Bankai Terminal entry point that bootstraps the async runtime and logging.
@@ -12,22 +25,21 @@
  * - Startup recovery reconciles balances and open orders before trading.
  */
 use bankai_terminal::accounting::pnl::PnlMonitor;
+use bankai_terminal::accounting::reconcile::TradeReconciler;
+use bankai_terminal::accounting::recovery::StartupRecovery;
 use bankai_terminal::accounting::redemption::{
     RedemptionClient, RedemptionConfig, RedemptionListener, RedisPositionResolver,
 };
-use bankai_terminal::accounting::reconcile::TradeReconciler;
-use bankai_terminal::accounting::open_orders_refresh::OpenOrdersRefresher;
-use bankai_terminal::accounting::recovery::StartupRecovery;
 use bankai_terminal::config::{Config, ConfigManager};
 use bankai_terminal::engine::core::EngineCore;
 use bankai_terminal::engine::risk::{KillSwitchConfig, RiskState};
 use bankai_terminal::engine::trader::TradingEngine;
 use bankai_terminal::engine::types::MarketUpdate;
 use bankai_terminal::error::Result;
+use bankai_terminal::execution::allowances::AllowanceManager;
 use bankai_terminal::execution::orchestrator::{
     ExecutionOrchestrator, ExecutionOrchestratorConfig,
 };
-use bankai_terminal::execution::allowances::AllowanceManager;
 use bankai_terminal::execution::payload_builder::PolymarketPayloadBuilder;
 use bankai_terminal::execution::relayer::{RelayerClient, RelayerConfig};
 use bankai_terminal::execution::signer::Eip712Signer;
@@ -46,7 +58,6 @@ use bankai_terminal::storage::redis::RedisManager;
 use bankai_terminal::telemetry::health::HealthMonitor;
 use bankai_terminal::telemetry::{logging, metrics, preflight};
 use bankai_terminal::ui;
-use arc_swap::ArcSwap;
 use secrecy::ExposeSecret;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -187,7 +198,10 @@ async fn spawn_binance_oracle(
         Ok(url) => match RedisManager::new(&url).await {
             Ok(manager) => Some(manager),
             Err(error) => {
-                tracing::warn!(?error, "redis unavailable; binance window alignment disabled");
+                tracing::warn!(
+                    ?error,
+                    "redis unavailable; binance window alignment disabled"
+                );
                 None
             }
         },
@@ -425,7 +439,10 @@ async fn spawn_execution_pipeline(
     let wallet_key = match Eip712Signer::from_secrets(secrets, chain_id) {
         Ok(signer) => Some(format!("{}", signer.address()).to_ascii_lowercase()),
         Err(error) => {
-            tracing::warn!(?error, "failed to derive wallet address; position tracking disabled");
+            tracing::warn!(
+                ?error,
+                "failed to derive wallet address; position tracking disabled"
+            );
             None
         }
     };
@@ -455,20 +472,42 @@ async fn spawn_execution_pipeline(
         Ok(url) => match bankai_terminal::storage::database::DatabaseManager::new(&url, 5).await {
             Ok(db) => Some(db),
             Err(error) => {
-                tracing::warn!(?error, "failed to connect to database; execution logging disabled");
+                tracing::warn!(
+                    ?error,
+                    "failed to connect to database; execution logging disabled"
+                );
                 None
             }
         },
         Err(_) => None,
     };
 
+    let cancel_client = wallet_key.as_ref().and_then(|address| {
+        let config = bankai_terminal::execution::cancel::CancelClientConfig::from_env(
+            config.endpoints.relayer_http.clone(),
+        );
+        match bankai_terminal::execution::cancel::CancelClient::from_env(config, secrets, address) {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!(?error, "cancel client disabled");
+                None
+            }
+        }
+    });
+
     let orchestrator = ExecutionOrchestrator::new(
         ExecutionOrchestratorConfig {
             prefer_ws_reconcile: config.execution.prefer_ws_reconcile && user_ws_enabled,
+            max_retries: config.execution.relayer_max_retries,
+            backoff_ms: config.execution.relayer_backoff_ms,
+            backoff_max_ms: config.execution.relayer_backoff_max_ms,
+            idempotency_ttl_secs: config.execution.idempotency_ttl_secs,
+            cancel_before_replace: config.execution.cancel_before_replace,
             ..Default::default()
         },
         relayer,
         None,
+        cancel_client,
         database,
         None,
         Some(redis),
@@ -480,10 +519,7 @@ async fn spawn_execution_pipeline(
     Ok(())
 }
 
-async fn spawn_allowance_manager(
-    config: &Arc<Config>,
-    secrets: &security::Secrets,
-) -> Result<()> {
+async fn spawn_allowance_manager(config: &Arc<Config>, secrets: &security::Secrets) -> Result<()> {
     let redis = match std::env::var("REDIS_URL") {
         Ok(url) => match RedisManager::new(&url).await {
             Ok(manager) => Some(manager),
@@ -556,7 +592,10 @@ async fn spawn_pnl_monitor(config: &Arc<Config>, secrets: &security::Secrets) ->
     let wallet_key = match Eip712Signer::from_secrets(secrets, chain_id) {
         Ok(signer) => Some(format!("{}", signer.address()).to_ascii_lowercase()),
         Err(error) => {
-            tracing::warn!(?error, "failed to derive wallet address; pnl monitor disabled");
+            tracing::warn!(
+                ?error,
+                "failed to derive wallet address; pnl monitor disabled"
+            );
             None
         }
     };
@@ -627,9 +666,7 @@ async fn spawn_redemption_listener(
 fn parse_address(value: &str) -> Result<ethers_core::types::Address> {
     use std::str::FromStr;
     ethers_core::types::Address::from_str(value.trim()).map_err(|_| {
-        bankai_terminal::error::BankaiError::InvalidArgument(
-            "invalid exchange address".to_string(),
-        )
+        bankai_terminal::error::BankaiError::InvalidArgument("invalid exchange address".to_string())
     })
 }
 

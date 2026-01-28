@@ -127,6 +127,24 @@ pub struct ExecutionConfig {
     pub auto_cancel_orders: bool,
     #[serde(default = "default_execution_order_cancel_grace_secs")]
     pub order_cancel_grace_secs: u64,
+    #[serde(default = "default_execution_cancel_before_replace")]
+    pub cancel_before_replace: bool,
+    #[serde(default = "default_execution_ladder_order_type")]
+    pub ladder_order_type: String,
+    #[serde(default = "default_execution_snipe_order_type")]
+    pub snipe_order_type: String,
+    #[serde(default = "default_execution_post_only_ladder")]
+    pub post_only_ladder: bool,
+    #[serde(default = "default_execution_gtd_min_expiry_secs")]
+    pub gtd_min_expiry_secs: u64,
+    #[serde(default = "default_execution_relayer_max_retries")]
+    pub relayer_max_retries: u32,
+    #[serde(default = "default_execution_relayer_backoff_ms")]
+    pub relayer_backoff_ms: u64,
+    #[serde(default = "default_execution_relayer_backoff_max_ms")]
+    pub relayer_backoff_max_ms: u64,
+    #[serde(default = "default_execution_idempotency_ttl_secs")]
+    pub idempotency_ttl_secs: u64,
     #[serde(default = "default_execution_take_profit_bps")]
     pub take_profit_bps: f64,
     #[serde(default = "default_execution_stop_loss_bps")]
@@ -158,6 +176,15 @@ impl Default for ExecutionConfig {
             prefer_ws_reconcile: default_execution_prefer_ws_reconcile(),
             auto_cancel_orders: default_execution_auto_cancel_orders(),
             order_cancel_grace_secs: default_execution_order_cancel_grace_secs(),
+            cancel_before_replace: default_execution_cancel_before_replace(),
+            ladder_order_type: default_execution_ladder_order_type(),
+            snipe_order_type: default_execution_snipe_order_type(),
+            post_only_ladder: default_execution_post_only_ladder(),
+            gtd_min_expiry_secs: default_execution_gtd_min_expiry_secs(),
+            relayer_max_retries: default_execution_relayer_max_retries(),
+            relayer_backoff_ms: default_execution_relayer_backoff_ms(),
+            relayer_backoff_max_ms: default_execution_relayer_backoff_max_ms(),
+            idempotency_ttl_secs: default_execution_idempotency_ttl_secs(),
             take_profit_bps: default_execution_take_profit_bps(),
             stop_loss_bps: default_execution_stop_loss_bps(),
             trailing_stop_bps: default_execution_trailing_stop_bps(),
@@ -360,6 +387,42 @@ fn default_execution_auto_cancel_orders() -> bool {
 
 fn default_execution_order_cancel_grace_secs() -> u64 {
     2
+}
+
+fn default_execution_cancel_before_replace() -> bool {
+    true
+}
+
+fn default_execution_ladder_order_type() -> String {
+    "GTD".to_string()
+}
+
+fn default_execution_snipe_order_type() -> String {
+    "FOK".to_string()
+}
+
+fn default_execution_post_only_ladder() -> bool {
+    true
+}
+
+fn default_execution_gtd_min_expiry_secs() -> u64 {
+    60
+}
+
+fn default_execution_relayer_max_retries() -> u32 {
+    2
+}
+
+fn default_execution_relayer_backoff_ms() -> u64 {
+    50
+}
+
+fn default_execution_relayer_backoff_max_ms() -> u64 {
+    500
+}
+
+fn default_execution_idempotency_ttl_secs() -> u64 {
+    30
 }
 
 fn default_execution_take_profit_bps() -> f64 {
