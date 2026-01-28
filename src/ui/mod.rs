@@ -402,45 +402,18 @@ async fn snapshot_loop(
                         }
                     }
                     if let Some(orderbook) = orderbook.as_ref() {
-                        for snapshot in market_state.values_mut() {
-                            let Some(window) = redis.get_asset_window(&snapshot.asset).await? else {
-                                snapshot.market_id = None;
-                                snapshot.window = None;
-                                snapshot.implied_up = None;
-                                snapshot.implied_down = None;
-                                snapshot.start_price = None;
-                                snapshot.fee_rate_up_bps = None;
-                                snapshot.fee_rate_down_bps = None;
-                                continue;
-                            };
-                            snapshot.market_id = Some(window.market_id.clone());
-                            snapshot.window = Some(MarketWindow {
-                                start_time_ms: window.start_time_ms,
-                                end_time_ms: window.end_time_ms,
-                            });
-                            snapshot.start_price =
-                                match redis.get_asset_start_price(&snapshot.asset).await? {
-                                    Some((start_ms, price)) if start_ms == window.start_time_ms => {
-                                        Some(price)
-                                    }
-                                    _ => None,
-                                };
-                            let metadata = redis.get_market_metadata(&window.market_id).await?;
-                            if let Some(up_token) = metadata.outcome_up_token_id {
-                                snapshot.implied_up = orderbook.mid_price(&up_token).await?;
-                                snapshot.fee_rate_up_bps =
-                                    redis.get_fee_rate_bps(&up_token).await?;
-                            }
-                            if let Some(down_token) = metadata.outcome_down_token_id {
-                                snapshot.implied_down = orderbook.mid_price(&down_token).await?;
-                                snapshot.fee_rate_down_bps =
-                                    redis.get_fee_rate_bps(&down_token).await?;
-                            }
+                        if let Err(error) = refresh_market_snapshots(redis, orderbook, &mut market_state).await {
+                            tracing::warn!(?error, "failed to refresh market snapshots");
                         }
                     }
                 }
             }
             _ = refresh.tick() => {
+                if let (Some(redis), Some(orderbook)) = (redis.as_ref(), orderbook.as_ref()) {
+                    if let Err(error) = refresh_market_snapshots(redis, orderbook, &mut market_state).await {
+                        tracing::warn!(?error, "failed to refresh market snapshots");
+                    }
+                }
                 let snapshot = build_snapshot(
                     &config,
                     &risk,
@@ -466,6 +439,44 @@ async fn snapshot_loop(
         }
     }
 
+    Ok(())
+}
+
+async fn refresh_market_snapshots(
+    redis: &RedisManager,
+    orderbook: &OrderBookStore,
+    market_state: &mut HashMap<String, MarketSnapshot>,
+) -> Result<()> {
+    for snapshot in market_state.values_mut() {
+        let Some(window) = redis.get_asset_window(&snapshot.asset).await? else {
+            snapshot.market_id = None;
+            snapshot.window = None;
+            snapshot.implied_up = None;
+            snapshot.implied_down = None;
+            snapshot.start_price = None;
+            snapshot.fee_rate_up_bps = None;
+            snapshot.fee_rate_down_bps = None;
+            continue;
+        };
+        snapshot.market_id = Some(window.market_id.clone());
+        snapshot.window = Some(MarketWindow {
+            start_time_ms: window.start_time_ms,
+            end_time_ms: window.end_time_ms,
+        });
+        snapshot.start_price = match redis.get_asset_start_price(&snapshot.asset).await? {
+            Some((start_ms, price)) if start_ms == window.start_time_ms => Some(price),
+            _ => None,
+        };
+        let metadata = redis.get_market_metadata(&window.market_id).await?;
+        if let Some(up_token) = metadata.outcome_up_token_id {
+            snapshot.implied_up = orderbook.mid_price(&up_token).await?;
+            snapshot.fee_rate_up_bps = redis.get_fee_rate_bps(&up_token).await?;
+        }
+        if let Some(down_token) = metadata.outcome_down_token_id {
+            snapshot.implied_down = orderbook.mid_price(&down_token).await?;
+            snapshot.fee_rate_down_bps = redis.get_fee_rate_bps(&down_token).await?;
+        }
+    }
     Ok(())
 }
 
