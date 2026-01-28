@@ -16,6 +16,7 @@ use bankai_terminal::accounting::redemption::{
     RedemptionClient, RedemptionConfig, RedemptionListener, RedisPositionResolver,
 };
 use bankai_terminal::accounting::reconcile::TradeReconciler;
+use bankai_terminal::accounting::open_orders_refresh::OpenOrdersRefresher;
 use bankai_terminal::accounting::recovery::StartupRecovery;
 use bankai_terminal::config::{Config, ConfigManager};
 use bankai_terminal::engine::core::EngineCore;
@@ -23,7 +24,9 @@ use bankai_terminal::engine::risk::{KillSwitchConfig, RiskState};
 use bankai_terminal::engine::trader::TradingEngine;
 use bankai_terminal::engine::types::MarketUpdate;
 use bankai_terminal::error::Result;
-use bankai_terminal::execution::orchestrator::ExecutionOrchestrator;
+use bankai_terminal::execution::orchestrator::{
+    ExecutionOrchestrator, ExecutionOrchestratorConfig,
+};
 use bankai_terminal::execution::allowances::AllowanceManager;
 use bankai_terminal::execution::payload_builder::PolymarketPayloadBuilder;
 use bankai_terminal::execution::relayer::{RelayerClient, RelayerConfig};
@@ -131,21 +134,38 @@ async fn main() -> Result<()> {
     let _health = HealthMonitor::from_config(risk.clone(), &config.health)?.spawn();
 
     let (market_tx, _) = broadcast::channel(1024);
-    let tui_handle = spawn_tui_if_enabled(config_state.clone(), risk.clone(), market_tx.clone())
-        .await
-        .ok()
-        .flatten();
+    let chain_id = read_env_u64("POLYGON_CHAIN_ID").unwrap_or(137);
+    let wallet_key_for_ui = Eip712Signer::from_secrets(&secrets, chain_id)
+        .map(|signer| format!("{}", signer.address()).to_ascii_lowercase())
+        .ok();
+    let tui_handle = spawn_tui_if_enabled(
+        config_state.clone(),
+        risk.clone(),
+        market_tx.clone(),
+        wallet_key_for_ui,
+    )
+    .await
+    .ok()
+    .flatten();
     let engine = EngineCore::new(config_state.clone(), risk.clone());
     let _engine_handle = engine.spawn(market_tx.subscribe());
 
     spawn_binance_oracle(&config, market_tx.clone()).await?;
     spawn_allora_oracle(&config, market_tx.clone())?;
     spawn_polymarket_oracles(&config).await?;
-    spawn_polymarket_user_ws(&config, &secrets).await?;
-    spawn_execution_pipeline(&config, config_state.clone(), risk.clone(), &secrets, market_tx)
-        .await?;
+    let user_ws_enabled = spawn_polymarket_user_ws(&config, &secrets).await?;
+    spawn_execution_pipeline(
+        &config,
+        config_state.clone(),
+        risk.clone(),
+        &secrets,
+        market_tx,
+        user_ws_enabled,
+    )
+    .await?;
     spawn_allowance_manager(&config, &secrets).await?;
-    spawn_trade_reconciler(&config, &secrets).await?;
+    spawn_trade_reconciler(&config, &secrets, user_ws_enabled).await?;
+    spawn_open_orders_refresher(&config, &secrets).await?;
     spawn_pnl_monitor(&config, &secrets).await?;
     spawn_redemption_listener(&config, &secrets).await?;
 
@@ -229,8 +249,10 @@ async fn spawn_polymarket_oracles(config: &Arc<Config>) -> Result<()> {
     };
 
     let redis = RedisManager::new(&redis_url).await?;
-    let discovery_config =
-        PolymarketDiscoveryConfig::new(config.endpoints.polymarket_gamma.clone());
+    let discovery_config = PolymarketDiscoveryConfig::new(
+        config.endpoints.polymarket_gamma.clone(),
+        config.endpoints.relayer_http.clone(),
+    );
     let discovery = PolymarketDiscovery::new(discovery_config, redis.clone())?;
     let _discovery_handle = discovery.spawn();
 
@@ -254,33 +276,33 @@ async fn spawn_polymarket_oracles(config: &Arc<Config>) -> Result<()> {
 async fn spawn_polymarket_user_ws(
     config: &Arc<Config>,
     secrets: &security::Secrets,
-) -> Result<()> {
+) -> Result<bool> {
     let redis_url = match std::env::var("REDIS_URL") {
         Ok(value) => value,
         Err(_) => {
             tracing::warn!("REDIS_URL not set; polymarket user ws disabled");
-            return Ok(());
+            return Ok(false);
         }
     };
     let api_key = match secrets.polymarket_api_key.as_ref() {
         Some(value) => value.expose_secret().to_string(),
         None => {
             tracing::warn!("polymarket api key missing; user ws disabled");
-            return Ok(());
+            return Ok(false);
         }
     };
     let api_secret = match secrets.polymarket_api_secret.as_ref() {
         Some(value) => value.expose_secret().to_string(),
         None => {
             tracing::warn!("polymarket api secret missing; user ws disabled");
-            return Ok(());
+            return Ok(false);
         }
     };
     let api_passphrase = match secrets.polymarket_api_passphrase.as_ref() {
         Some(value) => value.expose_secret().to_string(),
         None => {
             tracing::warn!("polymarket api passphrase missing; user ws disabled");
-            return Ok(());
+            return Ok(false);
         }
     };
 
@@ -289,7 +311,7 @@ async fn spawn_polymarket_user_ws(
         Ok(signer) => format!("{}", signer.address()).to_ascii_lowercase(),
         Err(error) => {
             tracing::warn!(?error, "failed to derive wallet address; user ws disabled");
-            return Ok(());
+            return Ok(false);
         }
     };
 
@@ -320,7 +342,7 @@ async fn spawn_polymarket_user_ws(
         wallet_key,
     );
     let _handle = user_ws.spawn();
-    Ok(())
+    Ok(true)
 }
 
 fn derive_user_ws(market_ws: &str) -> Option<String> {
@@ -378,6 +400,7 @@ async fn spawn_execution_pipeline(
     risk: Arc<RiskState>,
     secrets: &security::Secrets,
     market_tx: broadcast::Sender<MarketUpdate>,
+    user_ws_enabled: bool,
 ) -> Result<()> {
     let redis_url = match std::env::var("REDIS_URL") {
         Ok(value) => value,
@@ -440,7 +463,10 @@ async fn spawn_execution_pipeline(
     };
 
     let orchestrator = ExecutionOrchestrator::new(
-        Default::default(),
+        ExecutionOrchestratorConfig {
+            prefer_ws_reconcile: config.execution.prefer_ws_reconcile && user_ws_enabled,
+            ..Default::default()
+        },
         relayer,
         None,
         database,
@@ -478,7 +504,12 @@ async fn spawn_allowance_manager(
 async fn spawn_trade_reconciler(
     config: &Arc<Config>,
     secrets: &security::Secrets,
+    user_ws_enabled: bool,
 ) -> Result<()> {
+    if config.execution.prefer_ws_reconcile && user_ws_enabled {
+        tracing::info!("user ws enabled; trade reconciler disabled");
+        return Ok(());
+    }
     let redis_url = match std::env::var("REDIS_URL") {
         Ok(value) => value,
         Err(_) => {
@@ -491,6 +522,25 @@ async fn spawn_trade_reconciler(
         return Ok(());
     };
     let _handle = reconciler.spawn();
+    Ok(())
+}
+
+async fn spawn_open_orders_refresher(
+    config: &Arc<Config>,
+    secrets: &security::Secrets,
+) -> Result<()> {
+    let redis_url = match std::env::var("REDIS_URL") {
+        Ok(value) => value,
+        Err(_) => {
+            tracing::warn!("REDIS_URL not set; open orders refresher disabled");
+            return Ok(());
+        }
+    };
+    let redis = RedisManager::new(&redis_url).await?;
+    let Some(refresher) = OpenOrdersRefresher::from_env(config, secrets, redis)? else {
+        return Ok(());
+    };
+    let _handle = refresher.spawn();
     Ok(())
 }
 
@@ -599,6 +649,7 @@ async fn spawn_tui_if_enabled(
     config: Arc<arc_swap::ArcSwap<Config>>,
     risk: Arc<RiskState>,
     sender: broadcast::Sender<MarketUpdate>,
+    wallet_key: Option<String>,
 ) -> Result<Option<ui::TuiHandle>> {
     if !ui::is_tui_enabled() {
         return Ok(None);
@@ -615,7 +666,7 @@ async fn spawn_tui_if_enabled(
         Err(_) => None,
     };
 
-    match ui::spawn_tui(config, risk, sender.subscribe(), redis) {
+    match ui::spawn_tui(config, risk, sender.subscribe(), redis, wallet_key) {
         Ok(handle) => Ok(Some(handle)),
         Err(error) => {
             tracing::warn!(?error, "failed to start tui");

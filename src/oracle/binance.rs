@@ -33,6 +33,11 @@ fn compute_jitter(max_ms: u64) -> Result<Duration> {
     Ok(Duration::from_millis(jitter))
 }
 
+fn now_ms() -> Result<u64> {
+    let duration = SystemTime::now().duration_since(UNIX_EPOCH)?;
+    Ok(duration.as_millis() as u64)
+}
+
 #[derive(Debug, Clone)]
 pub struct BinanceOracleConfig {
     pub endpoint: String,
@@ -134,6 +139,14 @@ impl BinanceOracle {
                                         .or_insert_with(|| AssetState::new(self.config.candle_interval));
                                     if let Some(window) = asset_windows.get(&asset_key) {
                                         state.set_window(window);
+                                        if let (Some(redis), Some((start_ms, price))) =
+                                            (self.config.redis.as_ref(), state.take_start_price_if_ready(window))
+                                        {
+                                            let now = now_ms().unwrap_or(0);
+                                            let _ = redis
+                                                .set_asset_start_price(&asset_key, start_ms, price, now)
+                                                .await;
+                                        }
                                     }
                                     if let Some(update) = state.apply_event(event)? {
                                         let _ = sender.send(MarketUpdate::Binance(update));
@@ -252,6 +265,7 @@ struct AssetState {
     candle_open_price: Option<f64>,
     candle_interval_ms: u64,
     anchor_start_ms: Option<u64>,
+    recorded_start_ms: Option<u64>,
 }
 
 impl AssetState {
@@ -266,6 +280,7 @@ impl AssetState {
             candle_open_price: None,
             candle_interval_ms: candle_interval.as_millis() as u64,
             anchor_start_ms: None,
+            recorded_start_ms: None,
         }
     }
 
@@ -282,7 +297,24 @@ impl AssetState {
             self.candle_start_ms = None;
             self.candle_open_price = None;
             self.volatility.reset(Duration::from_millis(interval_ms));
+            self.recorded_start_ms = None;
         }
+    }
+
+    fn take_start_price_if_ready(&mut self, window: &AssetWindow) -> Option<(u64, f64)> {
+        let start_ms = window.start_time_ms;
+        if self.recorded_start_ms == Some(start_ms) {
+            return None;
+        }
+        if self.candle_start_ms != Some(start_ms) {
+            return None;
+        }
+        let price = self.candle_open_price?;
+        if price <= 0.0 {
+            return None;
+        }
+        self.recorded_start_ms = Some(start_ms);
+        Some((start_ms, price))
     }
 
     fn apply_event(&mut self, event: BinanceEvent) -> Result<Option<BinanceMarketUpdate>> {

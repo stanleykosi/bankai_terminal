@@ -36,12 +36,14 @@ const ORDER_LOG_LIMIT: usize = 20;
 #[derive(Debug, Clone)]
 pub struct ExecutionOrchestratorConfig {
     pub relayer_timeout: Duration,
+    pub prefer_ws_reconcile: bool,
 }
 
 impl Default for ExecutionOrchestratorConfig {
     fn default() -> Self {
         Self {
             relayer_timeout: Duration::from_millis(DEFAULT_RELAYER_TIMEOUT_MS),
+            prefer_ws_reconcile: true,
         }
     }
 }
@@ -185,10 +187,27 @@ impl ExecutionOrchestrator {
         payloads: &ExecutionPayloads,
     ) -> Result<ExecutionReport> {
         let mut metadata = base_metadata(intent, payloads.metadata.clone());
+        self.log_activity_event(format!(
+            "[RELAYER] send market={} mode={} edge_bps={:.1}",
+            intent.market_id,
+            trade_mode_label(intent.mode),
+            intent.edge_bps
+        ))
+        .await;
         let relayer_result = self.execute_relayer(payloads).await;
 
         match relayer_result {
             Ok(response) => {
+                self.log_activity_event(format!(
+                    "[RELAYER] ok market={} request_id={}",
+                    intent.market_id,
+                    response
+                        .request_id
+                        .as_ref()
+                        .map(|id| id.as_str())
+                        .unwrap_or("n/a")
+                ))
+                .await;
                 metadata.insert("relayer".to_string(), relayer_success_metadata(&response));
                 Ok(ExecutionReport {
                     success: true,
@@ -201,6 +220,12 @@ impl ExecutionOrchestrator {
                 })
             }
             Err(error) => {
+                self.log_activity_event(format!(
+                    "[RELAYER] fail market={} error={}",
+                    intent.market_id,
+                    format!("{:?}", error)
+                ))
+                .await;
                 metadata.insert("relayer".to_string(), relayer_error_metadata(&error));
                 if error.should_failover() {
                     if payloads.direct_request.is_some() {
@@ -328,6 +353,15 @@ impl ExecutionOrchestrator {
 }
 
 impl ExecutionOrchestrator {
+    async fn log_activity_event(&self, message: String) {
+        let Some(redis) = self.activity_redis.as_ref() else {
+            return;
+        };
+        let prefix = log_prefix();
+        let entry = format!("{prefix} {message}");
+        let _ = redis.push_activity_log(&entry, ORDER_LOG_LIMIT).await;
+    }
+
     async fn log_order_event(&self, intent: &TradeIntent, report: &ExecutionReport) {
         let Some(redis) = self.activity_redis.as_ref() else {
             return;
@@ -335,7 +369,7 @@ impl ExecutionOrchestrator {
         let prefix = log_prefix();
         let status = if report.success { "OK" } else { "FAIL" };
         let message = format!(
-            "{prefix} Order {status} rail={} market={} mode={} edge_bps={:.1}",
+            "{prefix} [ORDER] {status} rail={} market={} mode={} edge_bps={:.1}",
             report.rail.as_str(),
             intent.market_id,
             trade_mode_label(intent.mode),
@@ -345,6 +379,9 @@ impl ExecutionOrchestrator {
     }
 
     async fn update_tracked_position(&self, intent: &TradeIntent, payloads: &ExecutionPayloads) {
+        if self.config.prefer_ws_reconcile {
+            return;
+        }
         let Some(redis) = self.activity_redis.as_ref() else {
             return;
         };

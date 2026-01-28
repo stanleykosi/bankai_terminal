@@ -32,6 +32,11 @@ const USDC_DECIMALS: u32 = 6;
 const LOT_SIZE_DECIMALS: u32 = 2;
 const ORDER_PATH: &str = "/order";
 const VWAP_LEVEL_LIMIT: usize = 50;
+const SNIPE_FEE_SIZE_SCALE_DENOM_BPS: f64 = 2000.0;
+const SNIPE_FEE_SIZE_MIN_SCALE: f64 = 0.25;
+const SNIPE_FEE_CURVE_ALPHA: f64 = 0.5;
+const SNIPE_SLIPPAGE_SIZE_SCALE_DENOM_BPS: f64 = 300.0;
+const SNIPE_SLIPPAGE_SIZE_MIN_SCALE: f64 = 0.4;
 
 #[derive(Debug, Clone)]
 pub struct PolymarketPayloadBuilder {
@@ -106,7 +111,12 @@ impl PolymarketPayloadBuilder {
         let token_id = parse_token_id(&intent.asset_id)?;
         let book = fetch_book_quotes(&self.orderbook, &intent.asset_id).await?;
         let metadata = self.redis.get_market_metadata(&intent.market_id).await?;
-        let fee_rate_bps = metadata.fee_rate_bps.unwrap_or(config.fees.taker_fee_bps);
+        let fee_rate_bps = self
+            .redis
+            .get_fee_rate_bps(&intent.asset_id)
+            .await?
+            .or(metadata.fee_rate_bps)
+            .unwrap_or(config.fees.taker_fee_bps);
         let min_tick_size = metadata.min_tick_size.unwrap_or(0.001);
 
         let price = match (intent.side, intent.mode) {
@@ -153,6 +163,15 @@ impl PolymarketPayloadBuilder {
             .await?
         };
 
+        if intent.mode == TradeMode::Snipe && fee_rate_bps > 0.0 {
+            let price_curve = (4.0 * price * (1.0 - price)).clamp(0.0, 1.0);
+            let effective_fee_bps =
+                fee_rate_bps * (1.0 + (SNIPE_FEE_CURVE_ALPHA * price_curve));
+            let scale = (1.0 - (effective_fee_bps / SNIPE_FEE_SIZE_SCALE_DENOM_BPS))
+                .clamp(SNIPE_FEE_SIZE_MIN_SCALE, 1.0);
+            size *= scale;
+        }
+
         if let Some(min_size) = metadata.min_order_size {
             if size < min_size {
                 let notional = min_size * price;
@@ -173,37 +192,82 @@ impl PolymarketPayloadBuilder {
         }
 
         if intent.mode == TradeMode::Snipe {
+            let min_size_guard = metadata.min_order_size.unwrap_or(0.0);
+            let mut attempts = 0u8;
             let (side, best_price, mid_price) = match intent.side {
                 TradeSide::Buy => (BookSide::Ask, book.best_ask, book.mid),
                 TradeSide::Sell => (BookSide::Bid, book.best_bid, book.mid),
             };
-            let vwap = self
-                .orderbook
-                .vwap_for_size(&intent.asset_id, side, size, VWAP_LEVEL_LIMIT)
-                .await?
-                .ok_or_else(|| {
-                    BankaiError::InvalidArgument("insufficient order book depth".to_string())
-                })?;
-            let slippage_bps = if intent.side == TradeSide::Buy {
-                ((vwap.avg_price - best_price) / best_price) * 10_000.0
-            } else {
-                ((best_price - vwap.avg_price) / best_price) * 10_000.0
-            };
-            let impact_bps = if intent.side == TradeSide::Buy {
-                ((vwap.avg_price - mid_price) / mid_price) * 10_000.0
-            } else {
-                ((mid_price - vwap.avg_price) / mid_price) * 10_000.0
-            };
-            if slippage_bps > execution.max_slippage_bps {
-                return Err(BankaiError::InvalidArgument(
-                    "max slippage exceeded".to_string(),
-                ));
+            loop {
+                let vwap = self
+                    .orderbook
+                    .vwap_for_size(&intent.asset_id, side, size, VWAP_LEVEL_LIMIT)
+                    .await?
+                    .ok_or_else(|| {
+                        BankaiError::InvalidArgument("insufficient order book depth".to_string())
+                    })?;
+                let slippage_bps = if intent.side == TradeSide::Buy {
+                    ((vwap.avg_price - best_price) / best_price) * 10_000.0
+                } else {
+                    ((best_price - vwap.avg_price) / best_price) * 10_000.0
+                };
+                let impact_bps = if intent.side == TradeSide::Buy {
+                    ((vwap.avg_price - mid_price) / mid_price) * 10_000.0
+                } else {
+                    ((mid_price - vwap.avg_price) / mid_price) * 10_000.0
+                };
+                let mut scale: f64 = 1.0;
+                if slippage_bps > execution.max_slippage_bps {
+                    scale = scale.min(execution.max_slippage_bps / slippage_bps);
+                }
+                if impact_bps > execution.max_impact_bps {
+                    scale = scale.min(execution.max_impact_bps / impact_bps);
+                }
+                if slippage_bps > 0.0 {
+                    let slip_scale =
+                        (1.0 - (slippage_bps / SNIPE_SLIPPAGE_SIZE_SCALE_DENOM_BPS))
+                            .clamp(SNIPE_SLIPPAGE_SIZE_MIN_SCALE, 1.0);
+                    scale = scale.min(slip_scale);
+                }
+                if scale >= 0.999 || attempts >= 3 {
+                    if slippage_bps > execution.max_slippage_bps
+                        || impact_bps > execution.max_impact_bps
+                    {
+                        tracing::warn!(
+                            slippage_bps = slippage_bps,
+                            impact_bps = impact_bps,
+                            size = size,
+                            "snipe slippage/impact above guard; proceeding with reduced size"
+                        );
+                    }
+                    break;
+                }
+                let new_size = (size * scale).max(min_size_guard);
+                if (new_size - size).abs() < 1e-6 {
+                    break;
+                }
+                size = new_size;
+                attempts += 1;
             }
-            if impact_bps > execution.max_impact_bps {
-                return Err(BankaiError::InvalidArgument(
-                    "max price impact exceeded".to_string(),
-                ));
+        }
+
+        if let Some(min_size) = metadata.min_order_size {
+            if size < min_size {
+                let notional = min_size * price;
+                if notional > execution.max_order_usdc {
+                    return Err(BankaiError::InvalidArgument(
+                        "min order size exceeds max order notional".to_string(),
+                    ));
+                }
+                size = min_size;
             }
+        }
+
+        size = round_down(size, LOT_SIZE_DECIMALS);
+        if size <= 0.0 {
+            return Err(BankaiError::InvalidArgument(
+                "order size too small after rounding".to_string(),
+            ));
         }
 
         let (maker_amount, taker_amount, side) = match intent.side {

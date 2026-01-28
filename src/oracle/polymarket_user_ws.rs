@@ -10,7 +10,7 @@
  * - Uses user channel with auth to reconcile fills in near real time.
  */
 use futures_util::{SinkExt, StreamExt};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::time::Duration;
 use tokio_tungstenite::tungstenite::Message;
@@ -177,12 +177,46 @@ impl PolymarketUserWs {
             let rate = (matched / original).clamp(0.0, 1.0) * 100.0;
             metrics::record_order_fill_rate(rate);
         }
-        if order.order_type.to_ascii_uppercase() == "CANCELLATION" && matched <= 0.0 {
+        let status = if order.order_type.to_ascii_uppercase() == "CANCELLATION" && matched <= 0.0 {
+            "CANCELLED"
+        } else if original > 0.0 && matched >= original {
+            "FILLED"
+        } else if matched > 0.0 {
+            "PARTIAL"
+        } else {
+            "OPEN"
+        };
+        if status == "CANCELLED" {
             self.log_activity(format!(
                 "[ALERT] Order cancelled asset={} id={}",
                 order.asset_id, order.id
             ))
             .await;
+        }
+        let payload = OrderState {
+            id: order.id.clone(),
+            asset_id: order.asset_id.clone(),
+            status: status.to_string(),
+            original_size: original,
+            matched_size: matched,
+            order_type: order.order_type.clone(),
+        };
+        if let Ok(json) = serde_json::to_string(&payload) {
+            let now = current_unix_timestamp() * 1000;
+            let _ = self
+                .redis
+                .set_order_state(&self.wallet_key, &order.id, &json, now)
+                .await;
+        }
+        let open_key = open_orders_key(&self.wallet_key);
+        match status {
+            "OPEN" | "PARTIAL" => {
+                let _ = self.redis.sadd(&open_key, &order.id).await;
+            }
+            "FILLED" | "CANCELLED" => {
+                let _ = self.redis.srem(&open_key, &order.id).await;
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -334,4 +368,18 @@ fn parse_timestamp(value: &str) -> Option<u64> {
         return Some(parsed.timestamp() as u64);
     }
     None
+}
+
+#[derive(Debug, Serialize)]
+struct OrderState {
+    id: String,
+    asset_id: String,
+    status: String,
+    original_size: f64,
+    matched_size: f64,
+    order_type: String,
+}
+
+fn open_orders_key(address: &str) -> String {
+    format!("orders:open:{address}")
 }

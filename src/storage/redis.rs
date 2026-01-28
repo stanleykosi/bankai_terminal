@@ -38,6 +38,10 @@ const POSITIONS_ENTRY_PREFIX: &str = "positions:entry:";
 const POSITIONS_PEAK_PREFIX: &str = "positions:peak:";
 const ASSET_WINDOW_NEXT_PREFIX: &str = "polymarket:window_next:";
 const ASSET_WINDOW_CACHE_PREFIX: &str = "polymarket:windows:";
+const FEE_RATE_PREFIX: &str = "polymarket:fee_rate:";
+const ASSET_START_PRICE_PREFIX: &str = "polymarket:start_price:";
+const ORDERBOOK_TS_PREFIX: &str = "polymarket:book_ts:";
+const TOKEN_MARKET_PREFIX: &str = "polymarket:token_market:";
 
 #[derive(Debug, Clone)]
 pub struct AssetWindow {
@@ -401,6 +405,87 @@ impl RedisManager {
         })
     }
 
+    pub async fn set_fee_rate_bps(
+        &self,
+        token_id: &str,
+        fee_rate_bps: f64,
+        updated_at_ms: u64,
+    ) -> Result<()> {
+        let key = fee_rate_key(token_id);
+        let mut conn = self.connection.clone();
+        conn.hset::<_, _, _, ()>(key.as_str(), "feeRateBps", fee_rate_bps)
+            .await?;
+        conn.hset::<_, _, _, ()>(key.as_str(), "updatedAtMs", updated_at_ms as i64)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn get_fee_rate_bps(&self, token_id: &str) -> Result<Option<f64>> {
+        let key = fee_rate_key(token_id);
+        self.hget_float(&key, "feeRateBps").await
+    }
+
+    pub async fn set_token_market(&self, token_id: &str, market_id: &str) -> Result<()> {
+        let key = token_market_key(token_id);
+        let mut conn = self.connection.clone();
+        conn.hset::<_, _, _, ()>(key.as_str(), "marketId", market_id)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn get_token_market(&self, token_id: &str) -> Result<Option<String>> {
+        let key = token_market_key(token_id);
+        self.hget_string(&key, "marketId").await
+    }
+
+    pub async fn set_orderbook_update_ms(
+        &self,
+        token_id: &str,
+        updated_at_ms: u64,
+    ) -> Result<()> {
+        let key = orderbook_ts_key(token_id);
+        let mut conn = self.connection.clone();
+        conn.hset::<_, _, _, ()>(key.as_str(), "updatedAtMs", updated_at_ms as i64)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn get_orderbook_update_ms(&self, token_id: &str) -> Result<Option<u64>> {
+        let key = orderbook_ts_key(token_id);
+        let updated_at_ms = self.hget_i64(&key, "updatedAtMs").await?;
+        Ok(updated_at_ms.map(|value| value as u64))
+    }
+
+    pub async fn set_asset_start_price(
+        &self,
+        asset: &str,
+        start_time_ms: u64,
+        price: f64,
+        updated_at_ms: u64,
+    ) -> Result<()> {
+        let key = asset_start_price_key(asset);
+        let mut conn = self.connection.clone();
+        conn.hset::<_, _, _, ()>(key.as_str(), "startTimeMs", start_time_ms as i64)
+            .await?;
+        conn.hset::<_, _, _, ()>(key.as_str(), "price", price)
+            .await?;
+        conn.hset::<_, _, _, ()>(key.as_str(), "updatedAtMs", updated_at_ms as i64)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn get_asset_start_price(&self, asset: &str) -> Result<Option<(u64, f64)>> {
+        let key = asset_start_price_key(asset);
+        let start_time_ms = self.hget_i64(&key, "startTimeMs").await?;
+        let price = self.hget_float(&key, "price").await?;
+        match (start_time_ms, price) {
+            (Some(start), Some(price)) if start > 0 && price > 0.0 => {
+                Ok(Some((start as u64, price)))
+            }
+            _ => Ok(None),
+        }
+    }
+
     pub async fn set_polymarket_asset_ids(&self, asset_ids: &[String]) -> Result<()> {
         self.replace_set(POLYMARKET_ASSET_IDS_KEY, asset_ids).await
     }
@@ -414,10 +499,22 @@ impl RedisManager {
         Ok(conn.smembers(key).await?)
     }
 
+    pub async fn scard(&self, key: &str) -> Result<usize> {
+        let mut conn = self.connection.clone();
+        let count: i64 = conn.scard(key).await?;
+        Ok(count.max(0) as usize)
+    }
+
     pub async fn sadd(&self, key: &str, member: &str) -> Result<bool> {
         let mut conn = self.connection.clone();
         let added: u32 = conn.sadd(key, member).await?;
         Ok(added > 0)
+    }
+
+    pub async fn srem(&self, key: &str, member: &str) -> Result<bool> {
+        let mut conn = self.connection.clone();
+        let removed: u32 = conn.srem(key, member).await?;
+        Ok(removed > 0)
     }
 
     pub async fn sismember(&self, key: &str, member: &str) -> Result<bool> {
@@ -430,6 +527,34 @@ impl RedisManager {
         let ttl = i64::try_from(ttl_secs).unwrap_or(i64::MAX);
         let _: bool = conn.expire(key, ttl).await?;
         Ok(())
+    }
+
+    pub async fn set_order_state(
+        &self,
+        wallet_key: &str,
+        order_id: &str,
+        payload: &str,
+        updated_at_ms: u64,
+    ) -> Result<()> {
+        let details_key = orders_state_key(wallet_key);
+        let last_key = orders_last_key(wallet_key);
+        let mut conn = self.connection.clone();
+        conn.hset::<_, _, _, ()>(details_key.as_str(), order_id, payload)
+            .await?;
+        conn.hset::<_, _, _, ()>(last_key.as_str(), "payload", payload)
+            .await?;
+        conn.hset::<_, _, _, ()>(
+            last_key.as_str(),
+            "updatedAtMs",
+            updated_at_ms as i64,
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_last_order_state(&self, wallet_key: &str) -> Result<Option<String>> {
+        let key = orders_last_key(wallet_key);
+        self.hget_string(&key, "payload").await
     }
 
     pub async fn replace_set(&self, key: &str, values: &[String]) -> Result<()> {
@@ -526,6 +651,30 @@ fn asset_window_next_key(asset: &str) -> String {
 
 fn asset_window_cache_key(asset: &str) -> String {
     format!("{ASSET_WINDOW_CACHE_PREFIX}{asset}")
+}
+
+fn fee_rate_key(token_id: &str) -> String {
+    format!("{FEE_RATE_PREFIX}{token_id}")
+}
+
+fn asset_start_price_key(asset: &str) -> String {
+    format!("{ASSET_START_PRICE_PREFIX}{asset}")
+}
+
+fn orderbook_ts_key(token_id: &str) -> String {
+    format!("{ORDERBOOK_TS_PREFIX}{token_id}")
+}
+
+fn token_market_key(token_id: &str) -> String {
+    format!("{TOKEN_MARKET_PREFIX}{token_id}")
+}
+
+fn orders_state_key(wallet_key: &str) -> String {
+    format!("orders:state:{wallet_key}")
+}
+
+fn orders_last_key(wallet_key: &str) -> String {
+    format!("orders:last:{wallet_key}")
 }
 
 fn tracked_positions_key(wallet_key: &str) -> String {

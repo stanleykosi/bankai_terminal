@@ -73,6 +73,10 @@ impl OrderBookStore {
             self.apply_level(token_id, BookSide::Ask, &level.price, level.size)
                 .await?;
         }
+        let _ = self
+            .redis
+            .set_orderbook_update_ms(token_id, now_ms().unwrap_or(0))
+            .await;
         Ok(())
     }
 
@@ -98,6 +102,10 @@ impl OrderBookStore {
 
         self.redis.zadd(&zset_key, score, price).await?;
         self.redis.hset_float(&depth_key, price, size).await?;
+        let _ = self
+            .redis
+            .set_orderbook_update_ms(token_id, now_ms().unwrap_or(0))
+            .await;
         Ok(())
     }
 
@@ -165,6 +173,10 @@ impl OrderBookStore {
         }
     }
 
+    pub async fn last_update_ms(&self, token_id: &str) -> Result<Option<u64>> {
+        self.redis.get_orderbook_update_ms(token_id).await
+    }
+
     pub async fn vwap_for_size(
         &self,
         token_id: &str,
@@ -223,6 +235,12 @@ fn parse_price_score(price: &str) -> Result<f64> {
     trimmed
         .parse::<f64>()
         .map_err(|_| BankaiError::InvalidArgument("order book price not numeric".to_string()))
+}
+
+fn now_ms() -> Result<u64> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?;
+    Ok(now.as_millis() as u64)
 }
 
 fn bids_key(token_id: &str) -> String {

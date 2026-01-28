@@ -13,13 +13,14 @@
 use arc_swap::ArcSwap;
 use chrono::Utc;
 use chrono_tz::America::New_York;
+use reqwest::Client;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, mpsc};
 
-use crate::config::Config;
-use crate::engine::analysis::{analyze_opportunity, AnalysisInput};
+use crate::config::{Config, FeeConfig};
+use crate::engine::analysis::{analyze_opportunity, AnalysisInput, TradeDecision};
 use crate::engine::risk::RiskState;
 use crate::engine::types::{
     AlloraMarketUpdate, BinanceMarketUpdate, MarketUpdate, MarketWindow, TradeIntent, TradeMode,
@@ -31,8 +32,9 @@ use crate::storage::redis::RedisManager;
 const DEFAULT_TICK_INTERVAL: Duration = Duration::from_secs(5);
 const ACTIVITY_LOG_LIMIT: usize = 50;
 const SIGNAL_HORIZON_MS: u64 = 5 * 60 * 1_000;
-const SIGNAL_TARGET_TOLERANCE_MS: u64 = 30_000;
+const SIGNAL_TARGET_TOLERANCE_MS: u64 = 40_000;
 const SQRT_5: f64 = 2.236_067_977_5;
+const ORDERBOOK_STALE_MS: u64 = 5_000;
 
 pub struct TradingEngine {
     config: Arc<ArcSwap<Config>>,
@@ -41,6 +43,7 @@ pub struct TradingEngine {
     orderbook: OrderBookStore,
     intent_tx: mpsc::Sender<TradeIntent>,
     wallet_key: Option<String>,
+    gamma_client: Client,
 }
 
 impl TradingEngine {
@@ -52,6 +55,10 @@ impl TradingEngine {
         intent_tx: mpsc::Sender<TradeIntent>,
         wallet_key: Option<String>,
     ) -> Self {
+        let gamma_client = Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .expect("gamma client build");
         Self {
             config,
             risk,
@@ -59,6 +66,7 @@ impl TradingEngine {
             orderbook,
             intent_tx,
             wallet_key,
+            gamma_client,
         }
     }
 
@@ -143,7 +151,7 @@ impl TradingEngine {
             return Ok(());
         };
 
-        let price = resolve_binance_price(binance).ok_or_else(|| {
+        let _current_price = resolve_binance_price(binance).ok_or_else(|| {
             BankaiError::InvalidArgument("binance price missing".to_string())
         })?;
         let volatility = binance
@@ -166,11 +174,31 @@ impl TradingEngine {
         let Some(aligned) =
             select_aligned_5m_signal(&state.last_allora, asset, window, now)
         else {
+            let last = state.last_signal_miss_ms.get(asset).copied().unwrap_or(0);
+            if now.saturating_sub(last) > 30_000 {
+                self.log_alert(
+                    asset,
+                    "missing aligned 10m signal; skipping window",
+                )
+                .await;
+                state.last_signal_miss_ms.insert(asset.to_string(), now);
+            }
             return Ok(());
         };
         let allora = aligned.update;
         let alignment = aligned.alignment;
         if now.saturating_sub(allora.signal_timestamp_ms) > SIGNAL_HORIZON_MS {
+            return Ok(());
+        }
+
+        let Some((start_time_ms, start_price)) =
+            self.redis.get_asset_start_price(asset).await?
+        else {
+            self.log_alert(asset, "start price missing for active window").await;
+            return Ok(());
+        };
+        if start_time_ms != window.start_time_ms || start_price <= 0.0 {
+            self.log_alert(asset, "start price mismatch for active window").await;
             return Ok(());
         }
 
@@ -181,6 +209,20 @@ impl TradingEngine {
         let down_token = metadata
             .outcome_down_token_id
             .ok_or_else(|| BankaiError::InvalidArgument("down token id missing".to_string()))?;
+        let up_fee_bps = self.redis.get_fee_rate_bps(&up_token).await?;
+        let down_fee_bps = self.redis.get_fee_rate_bps(&down_token).await?;
+        if up_fee_bps.is_none() || down_fee_bps.is_none() {
+            let last_fee = state.last_fee_alert_ms.get(asset).copied().unwrap_or(0);
+            if now.saturating_sub(last_fee) > 60_000 {
+                if up_fee_bps.is_none() {
+                    self.log_alert(asset, "missing fee rate for UP token").await;
+                }
+                if down_fee_bps.is_none() {
+                    self.log_alert(asset, "missing fee rate for DOWN token").await;
+                }
+                state.last_fee_alert_ms.insert(asset.to_string(), now);
+            }
+        }
 
         if let Some(exit_intent) = self
             .check_exit_intent(asset, &asset_window.market_id, &up_token)
@@ -201,19 +243,35 @@ impl TradingEngine {
             return Ok(());
         }
 
-        let implied_up = self
-            .orderbook
-            .mid_price(&up_token)
-            .await?
-            .ok_or_else(|| BankaiError::InvalidArgument("up book mid missing".to_string()))?;
-        let implied_down = self
-            .orderbook
-            .mid_price(&down_token)
-            .await?
-            .unwrap_or_else(|| (1.0 - implied_up).max(0.0));
+        let mut implied_up = self.orderbook.mid_price(&up_token).await?;
+        let mut implied_down = self.orderbook.mid_price(&down_token).await?;
+        if is_orderbook_stale(&self.orderbook, &up_token, now).await? {
+            self.log_alert(asset, "orderbook stale for UP token; using gamma fallback")
+                .await;
+            if let Some((up, down)) =
+                fetch_outcomes_from_gamma(&self.gamma_client, &config.endpoints.polymarket_gamma, &asset_window.market_id).await
+            {
+                implied_up = implied_up.or(Some(up));
+                implied_down = implied_down.or(Some(down));
+            }
+        }
+        if is_orderbook_stale(&self.orderbook, &down_token, now).await? {
+            self.log_alert(asset, "orderbook stale for DOWN token; using gamma fallback")
+                .await;
+            if let Some((up, down)) =
+                fetch_outcomes_from_gamma(&self.gamma_client, &config.endpoints.polymarket_gamma, &asset_window.market_id).await
+            {
+                implied_up = implied_up.or(Some(up));
+                implied_down = implied_down.or(Some(down));
+            }
+        }
+        let implied_up = implied_up.ok_or_else(|| {
+            BankaiError::InvalidArgument("up book mid missing".to_string())
+        })?;
+        let implied_down = implied_down.unwrap_or_else(|| (1.0 - implied_up).max(0.0));
 
         let true_up = compute_true_probability_5m(
-            price,
+            start_price,
             allora.inference_value,
             volatility,
             config.execution.probability_scale,
@@ -223,6 +281,7 @@ impl TradingEngine {
         let true_down = (1.0 - true_up).clamp(0.0, 1.0);
 
         let mut best_intent: Option<TradeIntent> = None;
+        let (up_fees, up_fee_missing) = fee_config_for_token(&config, up_fee_bps);
         if let Ok(result) = analyze_opportunity(
             AnalysisInput {
                 market_id: asset_window.market_id.clone(),
@@ -233,13 +292,35 @@ impl TradingEngine {
                 market_window: Some(window),
             },
             &config.strategy,
-            &config.fees,
+            &up_fees,
         ) {
             if let Some(intent) = result.intent {
-                best_intent = Some(intent);
+                if up_fee_missing {
+                    match result.decision {
+                        TradeDecision::Snipe => {
+                            self.log_alert(
+                                asset,
+                                "fee rate missing; snipe intent blocked",
+                            )
+                            .await;
+                        }
+                        TradeDecision::Ladder => {
+                            self.log_alert(
+                                asset,
+                                "fee rate missing; ladder intent allowed",
+                            )
+                            .await;
+                        }
+                        _ => {}
+                    }
+                }
+                if !(up_fee_missing && result.decision == TradeDecision::Snipe) {
+                    best_intent = Some(intent);
+                }
             }
         }
 
+        let (down_fees, down_fee_missing) = fee_config_for_token(&config, down_fee_bps);
         if let Ok(result) = analyze_opportunity(
             AnalysisInput {
                 market_id: asset_window.market_id.clone(),
@@ -250,15 +331,36 @@ impl TradingEngine {
                 market_window: Some(window),
             },
             &config.strategy,
-            &config.fees,
+            &down_fees,
         ) {
             if let Some(intent) = result.intent {
-                let replace = match best_intent.as_ref() {
-                    Some(current) => intent.edge_bps > current.edge_bps,
-                    None => true,
-                };
-                if replace {
-                    best_intent = Some(intent);
+                if down_fee_missing {
+                    match result.decision {
+                        TradeDecision::Snipe => {
+                            self.log_alert(
+                                asset,
+                                "fee rate missing; snipe intent blocked",
+                            )
+                            .await;
+                        }
+                        TradeDecision::Ladder => {
+                            self.log_alert(
+                                asset,
+                                "fee rate missing; ladder intent allowed",
+                            )
+                            .await;
+                        }
+                        _ => {}
+                    }
+                }
+                if !(down_fee_missing && result.decision == TradeDecision::Snipe) {
+                    let replace = match best_intent.as_ref() {
+                        Some(current) => intent.edge_bps > current.edge_bps,
+                        None => true,
+                    };
+                    if replace {
+                        best_intent = Some(intent);
+                    }
                 }
             }
         }
@@ -281,8 +383,13 @@ impl TradingEngine {
             crate::engine::types::TradeSide::Sell => "SELL",
         };
         let message = format!(
-            "{prefix} Intent {} {side} mode={:?} edge_bps={:.1}",
-            asset, intent.mode, intent.edge_bps
+            "{prefix} [INTENT] {asset} {side} mode={:?} edge_bps={:.1} implied={:.4} true={:.4} market={} token={}",
+            intent.mode,
+            intent.edge_bps,
+            intent.implied_prob,
+            intent.true_prob,
+            intent.market_id,
+            intent.asset_id
         );
         let _ = self
             .redis
@@ -296,6 +403,15 @@ impl TradingEngine {
 }
 
 impl TradingEngine {
+    async fn log_alert(&self, asset: &str, message: &str) {
+        let prefix = log_prefix();
+        let entry = format!("{prefix} [ALERT] {asset} {message}");
+        let _ = self
+            .redis
+            .push_activity_log(&entry, ACTIVITY_LOG_LIMIT)
+            .await;
+    }
+
     async fn check_exit_intent(
         &self,
         _asset: &str,
@@ -394,6 +510,8 @@ struct TraderState {
     last_binance: HashMap<String, BinanceMarketUpdate>,
     last_allora: HashMap<String, AlloraMarketUpdate>,
     last_intent_ms: HashMap<String, u64>,
+    last_signal_miss_ms: HashMap<String, u64>,
+    last_fee_alert_ms: HashMap<String, u64>,
 }
 
 impl TraderState {
@@ -402,6 +520,8 @@ impl TraderState {
             last_binance: HashMap::new(),
             last_allora: HashMap::new(),
             last_intent_ms: HashMap::new(),
+            last_signal_miss_ms: HashMap::new(),
+            last_fee_alert_ms: HashMap::new(),
         }
     }
 }
@@ -486,6 +606,79 @@ fn compute_true_probability_5m(
     let z = delta / volatility_5m;
     let offset = (z * scale).tanh() * max_offset * alignment;
     (0.5 + offset).clamp(0.01, 0.99)
+}
+
+fn fee_config_for_token(config: &Config, fee_rate_bps: Option<f64>) -> (FeeConfig, bool) {
+    let mut fees = config.fees.clone();
+    if let Some(value) = fee_rate_bps {
+        fees.taker_fee_bps = value;
+        return (fees, false);
+    }
+    (fees, true)
+}
+
+async fn is_orderbook_stale(
+    orderbook: &OrderBookStore,
+    token_id: &str,
+    now_ms: u64,
+) -> Result<bool> {
+    let Some(last_update) = orderbook.last_update_ms(token_id).await? else {
+        return Ok(true);
+    };
+    Ok(now_ms.saturating_sub(last_update) > ORDERBOOK_STALE_MS)
+}
+
+async fn fetch_outcomes_from_gamma(
+    client: &Client,
+    base_url: &str,
+    market_id: &str,
+) -> Option<(f64, f64)> {
+    if base_url.trim().is_empty() || market_id.trim().is_empty() {
+        return None;
+    }
+    let url = format!("{}/markets/{}", base_url.trim_end_matches('/'), market_id);
+    let response = client.get(url).send().await.ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let body: serde_json::Value = response.json().await.ok()?;
+    let outcomes = body.get("outcomes")?;
+    let prices = body.get("outcomePrices")?;
+
+    let outcomes: Vec<String> = match outcomes {
+        serde_json::Value::String(value) => serde_json::from_str(value).ok()?,
+        serde_json::Value::Array(values) => values
+            .iter()
+            .filter_map(|value| value.as_str().map(|s| s.to_string()))
+            .collect(),
+        _ => return None,
+    };
+    let prices: Vec<f64> = match prices {
+        serde_json::Value::String(value) => serde_json::from_str(value).ok()?,
+        serde_json::Value::Array(values) => values
+            .iter()
+            .filter_map(|value| value.as_str().and_then(|s| s.parse::<f64>().ok()))
+            .collect(),
+        _ => return None,
+    };
+
+    if outcomes.len() != prices.len() {
+        return None;
+    }
+    let mut up = None;
+    let mut down = None;
+    for (outcome, price) in outcomes.iter().zip(prices.iter()) {
+        if outcome.eq_ignore_ascii_case("up") {
+            up = Some(*price);
+        } else if outcome.eq_ignore_ascii_case("down") {
+            down = Some(*price);
+        }
+    }
+    match (up, down) {
+        (Some(up), Some(down)) => Some((up, down)),
+        (Some(up), None) => Some((up, (1.0 - up).max(0.0))),
+        _ => None,
+    }
 }
 
 fn now_ms() -> Result<u64> {

@@ -13,6 +13,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table};
 use ratatui::Frame;
+use serde_json::Value;
 
 use super::{
     ActiveWindowRow, FinancialPanelData, HealthPanelData, MarketMode, MarketRow,
@@ -30,36 +31,42 @@ pub fn render_dashboard(frame: &mut Frame, snapshot: &UiSnapshot) {
 
     let body = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+        .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
         .split(layout[1]);
 
     let left = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Percentage(60),
+            Constraint::Percentage(40),
+        ])
         .split(body[0]);
-    render_markets(frame, left[0], &snapshot.markets);
-    render_activity_log(frame, left[1], &snapshot.activity_log);
+    render_window_bar(frame, left[0], &snapshot.active_windows);
+    render_markets(frame, left[1], &snapshot.markets);
+    render_activity_log(frame, left[2], &snapshot.activity_log);
 
     let right = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage(22),
-            Constraint::Percentage(18),
+            Constraint::Percentage(24),
+            Constraint::Percentage(20),
             Constraint::Percentage(26),
-            Constraint::Percentage(34),
+            Constraint::Percentage(30),
         ])
         .split(body[1]);
 
-    let top = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-        .split(right[0]);
-
-    render_health(frame, top[0], &snapshot.health);
-    render_financials(frame, top[1], &snapshot.financials);
-    render_polymarket(frame, right[1], &snapshot.polymarket);
-    render_active_windows(frame, right[2], &snapshot.active_windows);
-    render_pipeline(frame, right[3], snapshot);
+    render_system_panel(
+        frame,
+        right[0],
+        &snapshot.status,
+        &snapshot.health,
+        &snapshot.financials,
+        &snapshot.polymarket,
+    );
+    render_active_windows(frame, right[1], &snapshot.active_windows);
+    render_pipeline(frame, right[2], snapshot);
+    render_order_tape(frame, right[3], snapshot);
 }
 
 fn render_status_bar(frame: &mut Frame, area: Rect, status: &StatusBarData) {
@@ -132,10 +139,143 @@ fn render_status_bar(frame: &mut Frame, area: Rect, status: &StatusBarData) {
     frame.render_widget(paragraph, area);
 }
 
+fn render_system_panel(
+    frame: &mut Frame,
+    area: Rect,
+    status: &StatusBarData,
+    health: &HealthPanelData,
+    financials: &FinancialPanelData,
+    polymarket: &PolymarketPanelData,
+) {
+    let title = Span::styled(
+        " System ",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    );
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .style(Style::default().fg(Color::Cyan));
+
+    let mut lines = Vec::new();
+    let risk_label = if status.halted {
+        format!("HALTED ({})", halt_reason_label(health.halt_reason))
+    } else {
+        "OK".to_string()
+    };
+    lines.push(Line::from(vec![
+        Span::styled("Risk: ", Style::default().fg(Color::White)),
+        Span::styled(
+            risk_label,
+            if status.halted {
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Green)
+            },
+        ),
+    ]));
+
+    lines.push(Line::from(format!(
+        "Latency: {} ms | Drift: {} ms | Losses: {}",
+        health.latency_ms, health.clock_drift_ms, health.consecutive_losses
+    )));
+    lines.push(Line::from(format!(
+        "Binance: {} | Allora: {} | Poly: {}",
+        oracle_label(status.binance_online),
+        oracle_label(status.allora_online),
+        oracle_label(status.polymarket_online),
+    )));
+
+    let bankroll = financials
+        .bankroll_usdc
+        .map(|v| format!("{v:.2}"))
+        .unwrap_or_else(|| "--".to_string());
+    let pnl = financials
+        .pnl_24h
+        .map(|v| format!("{v:.2}"))
+        .unwrap_or_else(|| "--".to_string());
+    lines.push(Line::from(format!("Bankroll: {bankroll} | PnL 24h: {pnl}")));
+
+    let assets = polymarket
+        .asset_count
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "--".to_string());
+    let refresh = polymarket
+        .last_refresh
+        .map(format_duration)
+        .unwrap_or_else(|| "--".to_string());
+    lines.push(Line::from(format!(
+        "Poly Assets: {assets} | Refresh: {refresh}"
+    )));
+
+    if health.binance_window_anchor {
+        lines.push(Line::from(Span::styled(
+            "15m anchor: locked",
+            Style::default().fg(Color::Green),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            "15m anchor: pending",
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+
+    let paragraph = Paragraph::new(lines).block(block).alignment(Alignment::Left);
+    frame.render_widget(paragraph, area);
+}
+
+fn render_window_bar(frame: &mut Frame, area: Rect, windows: &[ActiveWindowRow]) {
+    let block = Block::default()
+        .title(Span::styled(
+            " Window Countdown ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .style(Style::default().fg(Color::Cyan));
+
+    let now_ms = now_epoch_ms();
+    let mut spans: Vec<Span> = Vec::new();
+    for row in windows {
+        let countdown = if row.start_time_ms == 0 || row.end_time_ms == 0 {
+            "--".to_string()
+        } else if now_ms < row.start_time_ms {
+            format!("+{}", fmt_secs((row.start_time_ms - now_ms) / 1000))
+        } else if now_ms <= row.end_time_ms {
+            format!("-{}", fmt_secs((row.end_time_ms - now_ms) / 1000))
+        } else {
+            "done".to_string()
+        };
+        let status_style = match row.status.as_str() {
+            "ACTIVE" => Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            "UPCOMING" => Style::default().fg(Color::Yellow),
+            "PAST" => Style::default().fg(Color::DarkGray),
+            _ => Style::default().fg(Color::DarkGray),
+        };
+        spans.push(Span::styled(
+            format!(" {} {} ", row.asset, countdown),
+            status_style,
+        ));
+        spans.push(Span::raw(" "));
+    }
+    if spans.is_empty() {
+        spans.push(Span::styled("--", Style::default().fg(Color::DarkGray)));
+    }
+
+    let paragraph = Paragraph::new(Line::from(spans))
+        .block(block)
+        .alignment(Alignment::Left);
+    frame.render_widget(paragraph, area);
+}
+
 fn render_markets(frame: &mut Frame, area: Rect, markets: &[MarketRow]) {
     let block = Block::default()
         .title(Span::styled(
-            " Markets ",
+            " Market Scanner ",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -154,12 +294,13 @@ fn render_markets(frame: &mut Frame, area: Rect, markets: &[MarketRow]) {
     let header = Row::new(vec![
         Cell::from("Asset"),
         Cell::from("Price"),
+        Cell::from("Imp Up"),
+        Cell::from("Start"),
         Cell::from("Sig 5m"),
-        Cell::from("Sig 8h"),
-        Cell::from("EV 5m"),
-        Cell::from("EV 8h"),
-        Cell::from("Fee"),
-        Cell::from("Mode"),
+        Cell::from("EV"),
+        Cell::from("Side"),
+        Cell::from("FeeBps"),
+        Cell::from("Mode (Signal)"),
         Cell::from("Age"),
     ])
     .style(
@@ -173,10 +314,11 @@ fn render_markets(frame: &mut Frame, area: Rect, markets: &[MarketRow]) {
         Row::new(vec![
             Cell::from(row.asset.clone()),
             Cell::from(format_optional_f64(row.price, 4)),
+            Cell::from(format_optional_f64(row.implied_up, 4)),
+            Cell::from(format_optional_f64(row.start_price, 4)),
             Cell::from(format_optional_f64(row.inference_5m, 4)),
-            Cell::from(format_optional_f64(row.inference_8h, 4)),
-            Cell::from(format_optional_f64(row.edge_bps_5m, 1)),
-            Cell::from(format_optional_f64(row.edge_bps_8h, 1)),
+            Cell::from(format_optional_f64(row.edge_bps, 1)),
+            Cell::from(row.side.clone().unwrap_or_else(|| "--".to_string())),
             Cell::from(format_optional_f64(row.fee_bps, 1)),
             Cell::from(Span::styled(row.mode.label(), mode_style)),
             Cell::from(format_age(row.last_update_ms)),
@@ -189,13 +331,13 @@ fn render_markets(frame: &mut Frame, area: Rect, markets: &[MarketRow]) {
             Constraint::Length(10),
             Constraint::Length(12),
             Constraint::Length(12),
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(10),
+            Constraint::Length(12),
+            Constraint::Length(12),
             Constraint::Length(10),
             Constraint::Length(8),
-            Constraint::Length(6),
+            Constraint::Length(10),
+            Constraint::Length(13),
+            Constraint::Length(8),
         ],
     )
     .header(header)
@@ -203,122 +345,6 @@ fn render_markets(frame: &mut Frame, area: Rect, markets: &[MarketRow]) {
     .column_spacing(1);
 
     frame.render_widget(table, area);
-}
-
-fn render_health(frame: &mut Frame, area: Rect, health: &HealthPanelData) {
-    let status_line = if health.halted {
-        Line::from(vec![
-            Span::styled("Status: ", Style::default().fg(Color::White)),
-            Span::styled(
-                format!("HALTED ({})", halt_reason_label(health.halt_reason)),
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ),
-        ])
-    } else {
-        Line::from(vec![
-            Span::styled("Status: ", Style::default().fg(Color::White)),
-            Span::styled("OK", Style::default().fg(Color::Green)),
-        ])
-    };
-
-    let lines = vec![
-        status_line,
-        Line::from(format!("Latency: {} ms", health.latency_ms)),
-        Line::from(format!("Clock drift: {} ms", health.clock_drift_ms)),
-        Line::from(format!("Losses: {}", health.consecutive_losses)),
-        Line::from(format!(
-            "Binance window anchor: {}",
-            if health.binance_window_anchor { "ON" } else { "OFF" }
-        )),
-    ];
-
-    let block = Block::default()
-        .title(Span::styled(
-            " System Health ",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ))
-        .borders(Borders::ALL)
-        .border_type(BorderType::Double)
-        .style(Style::default().fg(Color::Cyan));
-
-    let paragraph = Paragraph::new(lines)
-        .block(block)
-        .alignment(Alignment::Left);
-    frame.render_widget(paragraph, area);
-}
-
-fn render_financials(frame: &mut Frame, area: Rect, financials: &FinancialPanelData) {
-    let lines = vec![
-        Line::from(format!(
-            "Bankroll: {}",
-            format_optional_currency(financials.bankroll_usdc)
-        )),
-        Line::from(format!(
-            "24h PnL: {}",
-            format_optional_currency(financials.pnl_24h)
-        )),
-    ];
-
-    let block = Block::default()
-        .title(Span::styled(
-            " Financials ",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ))
-        .borders(Borders::ALL)
-        .border_type(BorderType::Double)
-        .style(Style::default().fg(Color::Cyan));
-
-    let paragraph = Paragraph::new(lines)
-        .block(block)
-        .alignment(Alignment::Left);
-    frame.render_widget(paragraph, area);
-}
-
-fn render_polymarket(frame: &mut Frame, area: Rect, polymarket: &PolymarketPanelData) {
-    let status_style = oracle_style(polymarket.online);
-    let status_label = if polymarket.online {
-        "ONLINE"
-    } else {
-        "OFFLINE"
-    };
-    let count_line = match polymarket.asset_count {
-        Some(count) => format!("Assets discovered: {}", count),
-        None => "Assets discovered: --".to_string(),
-    };
-    let refresh_line = match polymarket.last_refresh {
-        Some(age) => format!("Last refresh: {}s ago", age.as_secs()),
-        None => "Last refresh: --".to_string(),
-    };
-
-    let lines = vec![
-        Line::from(vec![
-            Span::styled("Status: ", Style::default().fg(Color::White)),
-            Span::styled(status_label, status_style),
-        ]),
-        Line::from(count_line),
-        Line::from(refresh_line),
-        Line::from("Source: Polymarket Gamma -> Redis asset ids"),
-    ];
-
-    let block = Block::default()
-        .title(Span::styled(
-            " Polymarket Discovery ",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ))
-        .borders(Borders::ALL)
-        .border_type(BorderType::Double)
-        .style(Style::default().fg(Color::Cyan));
-
-    let paragraph = Paragraph::new(lines)
-        .block(block)
-        .alignment(Alignment::Left);
-    frame.render_widget(paragraph, area);
 }
 
 fn render_activity_log(frame: &mut Frame, area: Rect, entries: &[String]) {
@@ -333,7 +359,7 @@ fn render_activity_log(frame: &mut Frame, area: Rect, entries: &[String]) {
 
     let block = Block::default()
         .title(Span::styled(
-            " Activity Log ",
+            " Event Feed ",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -351,7 +377,7 @@ fn render_activity_log(frame: &mut Frame, area: Rect, entries: &[String]) {
 fn render_active_windows(frame: &mut Frame, area: Rect, windows: &[ActiveWindowRow]) {
     let block = Block::default()
         .title(Span::styled(
-            " Active Windows ",
+            " Window Stack ",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -406,66 +432,35 @@ fn render_active_windows(frame: &mut Frame, area: Rect, windows: &[ActiveWindowR
 }
 
 fn render_pipeline(frame: &mut Frame, area: Rect, snapshot: &UiSnapshot) {
+    let mut lines: Vec<Line> = Vec::new();
     let label_style = Style::default()
         .fg(Color::Cyan)
         .add_modifier(Modifier::BOLD);
-
-    let mut lines: Vec<Line> = Vec::new();
-    let assets = snapshot
-        .polymarket
-        .asset_count
-        .map(|count| count.to_string())
-        .unwrap_or_else(|| "--".to_string());
-    let refresh = snapshot
-        .polymarket
-        .last_refresh
-        .map(|age| format!("{}s", age.as_secs()))
-        .unwrap_or_else(|| "--".to_string());
-
-    lines.push(Line::from(Span::styled("Discovery", label_style)));
-    lines.push(Line::from(format!("  assets={} refresh={}", assets, refresh)));
-    lines.push(Line::from(""));
-
-    lines.push(Line::from(Span::styled("Windows", label_style)));
-    if snapshot.active_windows.is_empty() {
-        lines.push(Line::from("  --"));
-    } else {
-        for row in snapshot.active_windows.iter() {
-            let status_style = match row.status.as_str() {
-                "ACTIVE" => Style::default().fg(Color::Green),
-                "UPCOMING" => Style::default().fg(Color::Yellow),
-                "PAST" => Style::default().fg(Color::DarkGray),
-                _ => Style::default().fg(Color::DarkGray),
-            };
-            lines.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(format!("{:>3}", row.asset), Style::default().fg(Color::White)),
-                Span::raw(" "),
-                Span::styled(format!("{:<8}", row.status), status_style),
-                Span::raw(" "),
-                Span::raw(row.window_et.clone()),
-            ]));
-        }
+    if let Some(status) = snapshot.execution_status.as_ref() {
+        lines.push(Line::from(vec![
+            Span::styled("Status: ", Style::default().fg(Color::White)),
+            Span::styled(status.clone(), Style::default().fg(Color::Cyan)),
+        ]));
+        lines.push(Line::from(""));
     }
+    let open_orders_label = snapshot
+        .open_orders
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "--".to_string());
+    lines.push(Line::from(vec![
+        Span::styled("Orders: ", Style::default().fg(Color::White)),
+        Span::raw(format!(
+            "ok={} fail={} open={}",
+            snapshot.orders_ok, snapshot.orders_fail, open_orders_label
+        )),
+    ]));
     lines.push(Line::from(""));
-
-    lines.push(Line::from(Span::styled("Intent", label_style)));
-    if snapshot.intent_log.is_empty() {
-        lines.push(Line::from("  --"));
-    } else {
-        for entry in snapshot.intent_log.iter().take(2) {
-            lines.push(Line::from(format!("  {entry}")));
-        }
-    }
-    lines.push(Line::from(""));
-
-    lines.push(Line::from(Span::styled("Order", label_style)));
-    if snapshot.order_log.is_empty() {
-        lines.push(Line::from("  --"));
-    } else {
-        for entry in snapshot.order_log.iter().take(2) {
-            lines.push(Line::from(format!("  {entry}")));
-        }
+    if let Some(state) = format_last_order_state(snapshot.last_order_state.as_ref()) {
+        lines.push(Line::from(vec![
+            Span::styled("Last Order: ", Style::default().fg(Color::White)),
+            Span::raw(state),
+        ]));
+        lines.push(Line::from(""));
     }
 
     let trade_line = snapshot
@@ -492,7 +487,7 @@ fn render_pipeline(frame: &mut Frame, area: Rect, snapshot: &UiSnapshot) {
 
     let block = Block::default()
         .title(Span::styled(
-            " Execution Pipeline ",
+            " Execution ",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -500,6 +495,49 @@ fn render_pipeline(frame: &mut Frame, area: Rect, snapshot: &UiSnapshot) {
         .borders(Borders::ALL)
         .border_type(BorderType::Double)
         .style(Style::default().fg(Color::Cyan));
+
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .alignment(Alignment::Left);
+    frame.render_widget(paragraph, area);
+}
+
+fn render_order_tape(frame: &mut Frame, area: Rect, snapshot: &UiSnapshot) {
+    let block = Block::default()
+        .title(Span::styled(
+            " Order Tape ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .style(Style::default().fg(Color::Cyan));
+
+    let mut lines = Vec::new();
+    lines.push(Line::from(Span::styled(
+        "Recent Intents",
+        Style::default().fg(Color::White),
+    )));
+    if snapshot.intent_log.is_empty() {
+        lines.push(Line::from("  --"));
+    } else {
+        for entry in snapshot.intent_log.iter().take(3) {
+            lines.push(Line::from(format!("  {entry}")));
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Recent Orders",
+        Style::default().fg(Color::White),
+    )));
+    if snapshot.order_log.is_empty() {
+        lines.push(Line::from("  --"));
+    } else {
+        for entry in snapshot.order_log.iter().take(3) {
+            lines.push(Line::from(format!("  {entry}")));
+        }
+    }
 
     let paragraph = Paragraph::new(lines)
         .block(block)
@@ -515,6 +553,19 @@ fn format_duration(duration: std::time::Duration) -> String {
     format!("{hours:02}:{minutes:02}:{seconds:02}")
 }
 
+fn now_epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn fmt_secs(secs: u64) -> String {
+    let minutes = secs / 60;
+    let seconds = secs % 60;
+    format!("{minutes:02}:{seconds:02}")
+}
+
 fn format_optional_f64(value: Option<f64>, precision: usize) -> String {
     match value {
         Some(value) => format!("{:.*}", precision, value),
@@ -522,11 +573,17 @@ fn format_optional_f64(value: Option<f64>, precision: usize) -> String {
     }
 }
 
-fn format_optional_currency(value: Option<f64>) -> String {
-    match value {
-        Some(value) => format!("${value:.2}"),
-        None => "N/A".to_string(),
-    }
+fn format_last_order_state(payload: Option<&String>) -> Option<String> {
+    let payload = payload?;
+    let value: Value = serde_json::from_str(payload).ok()?;
+    let status = value.get("status")?.as_str()?.to_string();
+    let id = value.get("id").and_then(|v| v.as_str()).unwrap_or("--");
+    let matched = value.get("matched_size").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let original = value
+        .get("original_size")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    Some(format!("{status} id={} {matched:.4}/{original:.4}", id))
 }
 
 fn mode_style(mode: &MarketMode) -> Style {
@@ -545,6 +602,14 @@ fn oracle_style(online: bool) -> Style {
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+    }
+}
+
+fn oracle_label(online: bool) -> &'static str {
+    if online {
+        "ONLINE"
+    } else {
+        "OFFLINE"
     }
 }
 

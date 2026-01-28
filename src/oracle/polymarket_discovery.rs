@@ -15,6 +15,7 @@ use chrono::{Datelike, Duration as ChronoDuration, NaiveDate, NaiveDateTime, Nai
 use chrono_tz::America::New_York;
 use regex::Regex;
 use reqwest::Client;
+use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
@@ -34,6 +35,7 @@ const WINDOW_CACHE_PRUNE_LAG_MS: u64 = 30 * 60 * 1_000;
 #[derive(Debug, Clone)]
 pub struct PolymarketDiscoveryConfig {
     pub base_url: String,
+    pub fee_rate_base_url: String,
     pub poll_interval: Duration,
     pub jitter_ms: u64,
     pub min_liquidity: f64,
@@ -41,9 +43,10 @@ pub struct PolymarketDiscoveryConfig {
 }
 
 impl PolymarketDiscoveryConfig {
-    pub fn new(base_url: String) -> Self {
+    pub fn new(base_url: String, fee_rate_base_url: String) -> Self {
         Self {
             base_url,
+            fee_rate_base_url,
             poll_interval: DEFAULT_POLL_INTERVAL,
             jitter_ms: DEFAULT_JITTER_MS,
             min_liquidity: DEFAULT_MIN_LIQUIDITY,
@@ -134,6 +137,30 @@ impl PolymarketDiscovery {
                                     Some(&outcome_tokens),
                                 )
                                 .await?;
+                            let _ = self
+                                .redis
+                                .set_token_market(&outcome_tokens.up, &metadata.market_id)
+                                .await;
+                            let _ = self
+                                .redis
+                                .set_token_market(&outcome_tokens.down, &metadata.market_id)
+                                .await;
+                            if let Some(fee_rate) =
+                                self.fetch_fee_rate_bps(&outcome_tokens.up).await?
+                            {
+                                let _ = self
+                                    .redis
+                                    .set_fee_rate_bps(&outcome_tokens.up, fee_rate, now_ms)
+                                    .await;
+                            }
+                            if let Some(fee_rate) =
+                                self.fetch_fee_rate_bps(&outcome_tokens.down).await?
+                            {
+                                let _ = self
+                                    .redis
+                                    .set_fee_rate_bps(&outcome_tokens.down, fee_rate, now_ms)
+                                    .await;
+                            }
                             accepted += 1;
                             let label = market_label(market);
                             let _ = self
@@ -195,6 +222,45 @@ impl PolymarketDiscovery {
         );
         let response = self.client.get(url).send().await?.error_for_status()?;
         Ok(response.json::<Vec<Value>>().await?)
+    }
+
+    async fn fetch_fee_rate_bps(&self, token_id: &str) -> Result<Option<f64>> {
+        let base = self.config.fee_rate_base_url.trim_end_matches('/');
+        if base.is_empty() || token_id.trim().is_empty() {
+            return Ok(None);
+        }
+        let url = format!("{base}/fee-rate?token_id={token_id}");
+        let mut last_error = None;
+        let mut response = None;
+        for _ in 0..3 {
+            match self.client.get(&url).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    response = Some(resp);
+                    break;
+                }
+                Ok(resp) => last_error = Some(format!("status {}", resp.status())),
+                Err(err) => last_error = Some(err.to_string()),
+            }
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+        let Some(response) = response else {
+            tracing::warn!(token_id = %token_id, error = last_error.unwrap_or_else(|| "unknown".to_string()), "fee rate fetch failed");
+            return Ok(None);
+        };
+        let body: FeeRateResponse = match response.json().await {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                tracing::warn!(token_id = %token_id, error = %err, "fee rate parse failed");
+                return Ok(None);
+            }
+        };
+        if let Some(fee_rate_bps) = body.fee_rate_bps {
+            return Ok(Some(fee_rate_bps));
+        }
+        if body.base_fee.is_some() {
+            return Ok(Some(0.0));
+        }
+        Ok(None)
     }
 
     async fn log_market_if_new(
@@ -369,6 +435,14 @@ struct MarketCandidate {
     market_id: String,
     label: String,
     asset_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FeeRateResponse {
+    #[serde(rename = "fee_rate_bps")]
+    fee_rate_bps: Option<f64>,
+    #[serde(rename = "base_fee")]
+    base_fee: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

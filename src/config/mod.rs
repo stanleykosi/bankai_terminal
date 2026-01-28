@@ -121,6 +121,12 @@ pub struct ExecutionConfig {
     pub allowance_check_interval_secs: u64,
     #[serde(default = "default_execution_trade_reconcile_interval_secs")]
     pub trade_reconcile_interval_secs: u64,
+    #[serde(default = "default_execution_prefer_ws_reconcile")]
+    pub prefer_ws_reconcile: bool,
+    #[serde(default = "default_execution_auto_cancel_orders")]
+    pub auto_cancel_orders: bool,
+    #[serde(default = "default_execution_order_cancel_grace_secs")]
+    pub order_cancel_grace_secs: u64,
     #[serde(default = "default_execution_take_profit_bps")]
     pub take_profit_bps: f64,
     #[serde(default = "default_execution_stop_loss_bps")]
@@ -149,6 +155,9 @@ impl Default for ExecutionConfig {
             allowance_target_usdc: default_execution_allowance_target_usdc(),
             allowance_check_interval_secs: default_execution_allowance_check_interval_secs(),
             trade_reconcile_interval_secs: default_execution_trade_reconcile_interval_secs(),
+            prefer_ws_reconcile: default_execution_prefer_ws_reconcile(),
+            auto_cancel_orders: default_execution_auto_cancel_orders(),
+            order_cancel_grace_secs: default_execution_order_cancel_grace_secs(),
             take_profit_bps: default_execution_take_profit_bps(),
             stop_loss_bps: default_execution_stop_loss_bps(),
             trailing_stop_bps: default_execution_trailing_stop_bps(),
@@ -339,6 +348,18 @@ fn default_execution_allowance_check_interval_secs() -> u64 {
 
 fn default_execution_trade_reconcile_interval_secs() -> u64 {
     10
+}
+
+fn default_execution_prefer_ws_reconcile() -> bool {
+    true
+}
+
+fn default_execution_auto_cancel_orders() -> bool {
+    true
+}
+
+fn default_execution_order_cancel_grace_secs() -> u64 {
+    2
 }
 
 fn default_execution_take_profit_bps() -> f64 {

@@ -28,8 +28,11 @@ use crate::accounting::keys::PNL_24H_KEY;
 use crate::config::Config;
 use crate::engine::analysis::snipe_threshold_bps;
 use crate::engine::risk::{HaltReason, RiskState};
-use crate::engine::types::{AlloraMarketUpdate, BinanceMarketUpdate, MarketUpdate};
+use crate::engine::types::{
+    AlloraMarketUpdate, BinanceMarketUpdate, MarketUpdate, MarketWindow,
+};
 use crate::error::Result;
+use crate::storage::orderbook::OrderBookStore;
 use crate::storage::redis::RedisManager;
 use chrono::{TimeZone, Utc};
 use chrono_tz::America::New_York;
@@ -46,6 +49,9 @@ const DEFAULT_INTENT_LOG_LIMIT: usize = 6;
 const DEFAULT_ORDER_LOG_LIMIT: usize = 6;
 const POLYMARKET_STALE_MS: u64 = 120_000;
 const ORACLE_ONLINE_MULTIPLIER: u64 = 3;
+const SIGNAL_HORIZON_MS: u64 = 5 * 60 * 1_000;
+const SIGNAL_TARGET_TOLERANCE_MS: u64 = 40_000;
+const SQRT_5: f64 = 2.236_067_977_5;
 
 type UiResult<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -107,6 +113,8 @@ pub struct ActiveWindowRow {
     pub market_id: String,
     pub window_et: String,
     pub status: String,
+    pub start_time_ms: u64,
+    pub end_time_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -132,10 +140,11 @@ impl MarketMode {
 pub struct MarketRow {
     pub asset: String,
     pub price: Option<f64>,
+    pub implied_up: Option<f64>,
+    pub start_price: Option<f64>,
     pub inference_5m: Option<f64>,
-    pub inference_8h: Option<f64>,
-    pub edge_bps_5m: Option<f64>,
-    pub edge_bps_8h: Option<f64>,
+    pub edge_bps: Option<f64>,
+    pub side: Option<String>,
     pub fee_bps: Option<f64>,
     pub mode: MarketMode,
     pub last_update_ms: Option<u64>,
@@ -151,6 +160,11 @@ pub struct UiSnapshot {
     pub activity_log: Vec<String>,
     pub intent_log: Vec<String>,
     pub order_log: Vec<String>,
+    pub execution_status: Option<String>,
+    pub orders_ok: usize,
+    pub orders_fail: usize,
+    pub open_orders: Option<usize>,
+    pub last_order_state: Option<String>,
     pub active_windows: Vec<ActiveWindowRow>,
 }
 
@@ -175,8 +189,16 @@ enum UiCommand {
 struct MarketSnapshot {
     asset: String,
     price: Option<f64>,
+    implied_up: Option<f64>,
+    implied_down: Option<f64>,
+    market_id: Option<String>,
+    window: Option<MarketWindow>,
+    start_price: Option<f64>,
     inference_5m: Option<f64>,
-    inference_8h: Option<f64>,
+    signal_timestamp_ms: Option<u64>,
+    volatility_1m: Option<f64>,
+    fee_rate_up_bps: Option<f64>,
+    fee_rate_down_bps: Option<f64>,
     last_binance_ms: Option<u64>,
     last_allora_ms: Option<u64>,
 }
@@ -186,8 +208,16 @@ impl MarketSnapshot {
         Self {
             asset,
             price: None,
+            implied_up: None,
+            implied_down: None,
+            market_id: None,
+            window: None,
+            start_price: None,
             inference_5m: None,
-            inference_8h: None,
+            signal_timestamp_ms: None,
+            volatility_1m: None,
+            fee_rate_up_bps: None,
+            fee_rate_down_bps: None,
             last_binance_ms: None,
             last_allora_ms: None,
         }
@@ -195,6 +225,7 @@ impl MarketSnapshot {
 
     fn apply_binance(&mut self, update: &BinanceMarketUpdate) {
         self.price = resolve_price(update);
+        self.volatility_1m = update.volatility_1m;
         let event_time = if update.event_time_ms > 0 {
             update.event_time_ms
         } else {
@@ -205,9 +236,11 @@ impl MarketSnapshot {
 
     fn apply_allora(&mut self, update: &AlloraMarketUpdate) {
         match update.timeframe.to_ascii_lowercase().as_str() {
-            "5m" => self.inference_5m = Some(update.inference_value),
-            "8h" => self.inference_8h = Some(update.inference_value),
-            _ => self.inference_5m = Some(update.inference_value),
+            "5m" => {
+                self.inference_5m = Some(update.inference_value);
+                self.signal_timestamp_ms = Some(update.signal_timestamp_ms);
+            }
+            _ => {}
         }
         let received_at = if update.received_at_ms > 0 {
             update.received_at_ms
@@ -234,6 +267,7 @@ pub fn spawn_tui(
     risk: Arc<RiskState>,
     receiver: broadcast::Receiver<MarketUpdate>,
     redis: Option<RedisManager>,
+    wallet_key: Option<String>,
 ) -> Result<TuiHandle> {
     let (tx, rx) = mpsc::channel();
     let ui_config = TuiConfig::default();
@@ -247,8 +281,16 @@ pub fn spawn_tui(
 
     let snapshot_sender = tx.clone();
     tokio::spawn(async move {
-        if let Err(error) =
-            snapshot_loop(config, risk, receiver, redis, snapshot_sender, ui_config).await
+        if let Err(error) = snapshot_loop(
+            config,
+            risk,
+            receiver,
+            redis,
+            wallet_key,
+            snapshot_sender,
+            ui_config,
+        )
+        .await
         {
             tracing::error!(?error, "tui snapshot loop stopped");
         }
@@ -262,6 +304,7 @@ async fn snapshot_loop(
     risk: Arc<RiskState>,
     mut receiver: broadcast::Receiver<MarketUpdate>,
     redis: Option<RedisManager>,
+    wallet_key: Option<String>,
     sender: mpsc::Sender<UiCommand>,
     ui_config: TuiConfig,
 ) -> Result<()> {
@@ -277,8 +320,11 @@ async fn snapshot_loop(
     let mut activity_log: Vec<String> = Vec::new();
     let mut intent_log: Vec<String> = Vec::new();
     let mut order_log: Vec<String> = Vec::new();
+    let mut open_orders: Option<usize> = None;
+    let mut last_order_state: Option<String> = None;
     let mut binance_window_anchor = false;
     let mut active_windows: Vec<ActiveWindowRow> = Vec::new();
+    let orderbook = redis.as_ref().map(|manager| OrderBookStore::new(manager.clone()));
 
     loop {
         tokio::select! {
@@ -344,6 +390,54 @@ async fn snapshot_loop(
                         Ok(entries) => order_log = entries,
                         Err(error) => tracing::warn!(?error, "failed to read order log from redis"),
                     }
+                    if let Some(wallet_key) = wallet_key.as_ref() {
+                        let key = open_orders_key(wallet_key);
+                        match redis.scard(&key).await {
+                            Ok(count) => open_orders = Some(count),
+                            Err(error) => tracing::warn!(?error, "failed to read open orders"),
+                        }
+                        match redis.get_last_order_state(wallet_key).await {
+                            Ok(value) => last_order_state = value,
+                            Err(error) => tracing::warn!(?error, "failed to read last order state"),
+                        }
+                    }
+                    if let Some(orderbook) = orderbook.as_ref() {
+                        for snapshot in market_state.values_mut() {
+                            let Some(window) = redis.get_asset_window(&snapshot.asset).await? else {
+                                snapshot.market_id = None;
+                                snapshot.window = None;
+                                snapshot.implied_up = None;
+                                snapshot.implied_down = None;
+                                snapshot.start_price = None;
+                                snapshot.fee_rate_up_bps = None;
+                                snapshot.fee_rate_down_bps = None;
+                                continue;
+                            };
+                            snapshot.market_id = Some(window.market_id.clone());
+                            snapshot.window = Some(MarketWindow {
+                                start_time_ms: window.start_time_ms,
+                                end_time_ms: window.end_time_ms,
+                            });
+                            snapshot.start_price =
+                                match redis.get_asset_start_price(&snapshot.asset).await? {
+                                    Some((start_ms, price)) if start_ms == window.start_time_ms => {
+                                        Some(price)
+                                    }
+                                    _ => None,
+                                };
+                            let metadata = redis.get_market_metadata(&window.market_id).await?;
+                            if let Some(up_token) = metadata.outcome_up_token_id {
+                                snapshot.implied_up = orderbook.mid_price(&up_token).await?;
+                                snapshot.fee_rate_up_bps =
+                                    redis.get_fee_rate_bps(&up_token).await?;
+                            }
+                            if let Some(down_token) = metadata.outcome_down_token_id {
+                                snapshot.implied_down = orderbook.mid_price(&down_token).await?;
+                                snapshot.fee_rate_down_bps =
+                                    redis.get_fee_rate_bps(&down_token).await?;
+                            }
+                        }
+                    }
                 }
             }
             _ = refresh.tick() => {
@@ -360,6 +454,8 @@ async fn snapshot_loop(
                     activity_log.clone(),
                     intent_log.clone(),
                     order_log.clone(),
+                    open_orders,
+                    last_order_state.clone(),
                     binance_window_anchor,
                     active_windows.clone(),
                 );
@@ -386,6 +482,8 @@ fn build_snapshot(
     activity_log: Vec<String>,
     intent_log: Vec<String>,
     order_log: Vec<String>,
+    open_orders: Option<usize>,
+    last_order_state: Option<String>,
     binance_window_anchor: bool,
     active_windows: Vec<ActiveWindowRow>,
 ) -> UiSnapshot {
@@ -433,11 +531,11 @@ fn build_snapshot(
     let snipe_floor = snipe_threshold_bps(&config.strategy, &config.fees);
     let mut markets: Vec<MarketRow> = market_state
         .values()
-        .map(|snapshot| build_market_row(snapshot, snipe_floor, config.fees.taker_fee_bps))
+        .map(|snapshot| build_market_row(snapshot, snipe_floor, &config, now_ms))
         .collect();
     markets.sort_by(|a, b| {
-        let left = a.edge_bps_5m.unwrap_or(f64::NEG_INFINITY);
-        let right = b.edge_bps_5m.unwrap_or(f64::NEG_INFINITY);
+        let left = a.edge_bps.unwrap_or(f64::NEG_INFINITY);
+        let right = b.edge_bps.unwrap_or(f64::NEG_INFINITY);
         right
             .partial_cmp(&left)
             .unwrap_or(std::cmp::Ordering::Equal)
@@ -445,6 +543,10 @@ fn build_snapshot(
     if markets.len() > market_limit {
         markets.truncate(market_limit);
     }
+
+    let exec_status = execution_status(&intent_log, &order_log);
+    let orders_ok = count_orders(&order_log, "[ORDER] OK");
+    let orders_fail = count_orders(&order_log, "[ORDER] FAIL");
 
     UiSnapshot {
         status,
@@ -455,6 +557,11 @@ fn build_snapshot(
         activity_log,
         intent_log,
         order_log,
+        execution_status: exec_status,
+        orders_ok,
+        orders_fail,
+        open_orders,
+        last_order_state,
         active_windows,
     }
 }
@@ -462,39 +569,116 @@ fn build_snapshot(
 fn build_market_row(
     snapshot: &MarketSnapshot,
     snipe_floor_bps: f64,
-    taker_fee_bps: f64,
+    config: &Config,
+    now_ms: u64,
 ) -> MarketRow {
-    let edge_bps_5m = edge_for(snapshot.price, snapshot.inference_5m);
-    let edge_bps_8h = edge_for(snapshot.price, snapshot.inference_8h);
+    let last_update_ms = snapshot.last_binance_ms.max(snapshot.last_allora_ms);
 
-    // Prefer short-horizon signal for mode; fall back to 8h when 5m missing.
-    let chosen_edge = edge_bps_5m.or(edge_bps_8h);
-    let mode = match chosen_edge {
-        None => MarketMode::NoSignal,
-        Some(value) if value > 0.0 && value >= snipe_floor_bps => MarketMode::Snipe,
-        Some(value) if value > 0.0 => MarketMode::Ladder,
-        _ => MarketMode::Hold,
+    let implied_up = snapshot.implied_up;
+    let implied_down = snapshot.implied_down.or_else(|| implied_up.map(|v| (1.0 - v).max(0.0)));
+
+    let alignment = alignment_factor(snapshot, now_ms);
+    let volatility_1m = snapshot
+        .volatility_1m
+        .unwrap_or(config.execution.min_volatility)
+        .max(config.execution.min_volatility);
+
+    let true_up = match (snapshot.start_price, snapshot.inference_5m, alignment) {
+        (Some(start_price), Some(predicted), Some(alignment)) => Some(
+            compute_true_probability_5m(
+            start_price,
+            predicted,
+            volatility_1m,
+            config.execution.probability_scale,
+            config.execution.probability_max_offset,
+            alignment,
+        )),
+        _ => None,
     };
+    let true_down = true_up.map(|value| (1.0 - value).clamp(0.0, 1.0));
 
-    let fee_bps = match mode {
-        MarketMode::Snipe => Some(taker_fee_bps),
-        MarketMode::Ladder => Some(0.0),
+    let edge_up = match (true_up, implied_up) {
+        (Some(true_up), Some(implied)) => Some((true_up - implied) * 10_000.0),
+        _ => None,
+    };
+    let edge_down = match (true_down, implied_down) {
+        (Some(true_down), Some(implied)) => Some((true_down - implied) * 10_000.0),
         _ => None,
     };
 
-    let last_update_ms = snapshot.last_binance_ms.max(snapshot.last_allora_ms);
+    let (edge_bps, side, mode) = match (edge_up, edge_down) {
+        (None, None) => (None, None, MarketMode::NoSignal),
+        _ => {
+            let mut best_side = None;
+            let mut best_edge = None;
+            if let Some(edge) = edge_up {
+                best_edge = Some(edge);
+                best_side = Some("UP");
+            }
+            if let Some(edge) = edge_down {
+                let replace = match best_edge {
+                    Some(current) => edge > current,
+                    None => true,
+                };
+                if replace {
+                    best_edge = Some(edge);
+                    best_side = Some("DOWN");
+                }
+            }
+
+            match best_edge {
+                Some(edge) if edge > 0.0 && edge >= snipe_floor_bps => (
+                    Some(edge),
+                    best_side.map(|v| v.to_string()),
+                    MarketMode::Snipe,
+                ),
+                Some(edge) if edge > 0.0 => (
+                    Some(edge),
+                    best_side.map(|v| v.to_string()),
+                    MarketMode::Ladder,
+                ),
+                Some(edge) => (
+                    Some(edge),
+                    best_side.map(|v| v.to_string()),
+                    MarketMode::Hold,
+                ),
+                None => (None, None, MarketMode::NoSignal),
+            }
+        }
+    };
+
+    let fee_bps = snapshot.fee_rate_up_bps;
 
     MarketRow {
         asset: snapshot.asset.clone(),
         price: snapshot.price,
+        implied_up,
+        start_price: snapshot.start_price,
         inference_5m: snapshot.inference_5m,
-        inference_8h: snapshot.inference_8h,
-        edge_bps_5m,
-        edge_bps_8h,
+        edge_bps,
+        side,
         fee_bps,
         mode,
         last_update_ms,
     }
+}
+
+fn execution_status(intent_log: &[String], order_log: &[String]) -> Option<String> {
+    if order_log.iter().any(|entry| entry.contains("[ORDER]")) {
+        return Some("ORDER_SENT".to_string());
+    }
+    if intent_log.iter().any(|entry| entry.contains("[INTENT]")) {
+        return Some("SIGNAL_ONLY".to_string());
+    }
+    None
+}
+
+fn count_orders(entries: &[String], needle: &str) -> usize {
+    entries.iter().filter(|entry| entry.contains(needle)).count()
+}
+
+fn open_orders_key(wallet_key: &str) -> String {
+    format!("orders:open:{wallet_key}")
 }
 
 fn last_binance_update_ms(state: &HashMap<String, MarketSnapshot>) -> Option<u64> {
@@ -568,6 +752,11 @@ fn ui_loop(receiver: mpsc::Receiver<UiCommand>, config: TuiConfig) -> UiResult<(
         activity_log: Vec::new(),
         intent_log: Vec::new(),
         order_log: Vec::new(),
+        execution_status: None,
+        orders_ok: 0,
+        orders_fail: 0,
+        open_orders: None,
+        last_order_state: None,
         active_windows: Vec::new(),
     };
 
@@ -648,14 +837,42 @@ fn now_ms() -> Option<u64> {
     Some(now.as_millis() as u64)
 }
 
-fn edge_for(price: Option<f64>, inference: Option<f64>) -> Option<f64> {
-    match (price, inference) {
-        (Some(price), Some(inference)) if price > 0.0 => {
-            Some((inference - price) / price * 10_000.0)
-        }
-        _ => None,
+fn alignment_factor(snapshot: &MarketSnapshot, now_ms: u64) -> Option<f64> {
+    let signal_ts = snapshot.signal_timestamp_ms?;
+    let window = snapshot.window?;
+    if signal_ts < window.start_time_ms || signal_ts > window.end_time_ms {
+        return None;
     }
+    if now_ms.saturating_sub(signal_ts) > SIGNAL_HORIZON_MS {
+        return None;
+    }
+    let target_ts = window.end_time_ms.saturating_sub(SIGNAL_HORIZON_MS);
+    let diff = signal_ts.abs_diff(target_ts);
+    if diff > SIGNAL_TARGET_TOLERANCE_MS {
+        return None;
+    }
+    let alignment = 1.0 - (diff as f64 / SIGNAL_HORIZON_MS as f64);
+    Some(alignment.clamp(0.0, 1.0))
 }
+
+fn compute_true_probability_5m(
+    current_price: f64,
+    predicted_price: f64,
+    volatility_1m: f64,
+    scale: f64,
+    max_offset: f64,
+    alignment: f64,
+) -> f64 {
+    if current_price <= 0.0 {
+        return 0.5;
+    }
+    let delta = (predicted_price - current_price) / current_price;
+    let volatility_5m = (volatility_1m * SQRT_5).max(1e-9);
+    let z = delta / volatility_5m;
+    let offset = (z * scale).tanh() * max_offset * alignment;
+    (0.5 + offset).clamp(0.01, 0.99)
+}
+
 
 fn is_polymarket_online(last_refresh: Option<Instant>) -> bool {
     last_refresh
@@ -681,6 +898,8 @@ async fn load_active_windows(redis: &RedisManager) -> Result<Vec<ActiveWindowRow
                     market_id: window.market_id,
                     window_et: format_window_et(window.start_time_ms, window.end_time_ms),
                     status: status.to_string(),
+                    start_time_ms: window.start_time_ms,
+                    end_time_ms: window.end_time_ms,
                 });
             }
             None => rows.push(ActiveWindowRow {
@@ -688,6 +907,8 @@ async fn load_active_windows(redis: &RedisManager) -> Result<Vec<ActiveWindowRow
                 market_id: "--".to_string(),
                 window_et: "--".to_string(),
                 status: "NONE".to_string(),
+                start_time_ms: 0,
+                end_time_ms: 0,
             }),
         }
     }
