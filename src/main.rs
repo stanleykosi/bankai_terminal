@@ -10,6 +10,7 @@
 )]
 
 use arc_swap::ArcSwap;
+use bankai_terminal::accounting::bankroll_refresh::BankrollRefresher;
 use bankai_terminal::accounting::open_orders_refresh::OpenOrdersRefresher;
 /**
  * @purpose
@@ -175,6 +176,7 @@ async fn main() -> Result<()> {
     )
     .await?;
     spawn_allowance_manager(&config, &secrets).await?;
+    spawn_bankroll_refresher(&config, &secrets).await?;
     spawn_trade_reconciler(&config, &secrets, user_ws_enabled).await?;
     spawn_open_orders_refresher(&config, &secrets).await?;
     spawn_pnl_monitor(&config, &secrets).await?;
@@ -534,6 +536,22 @@ async fn spawn_allowance_manager(config: &Arc<Config>, secrets: &security::Secre
         return Ok(());
     };
     let _handle = manager.spawn();
+    Ok(())
+}
+
+async fn spawn_bankroll_refresher(config: &Arc<Config>, secrets: &security::Secrets) -> Result<()> {
+    let redis_url = match std::env::var("REDIS_URL") {
+        Ok(value) => value,
+        Err(_) => {
+            tracing::warn!("REDIS_URL not set; bankroll refresher disabled");
+            return Ok(());
+        }
+    };
+    let redis = RedisManager::new(&redis_url).await?;
+    let Some(refresher) = BankrollRefresher::from_env(config, secrets, redis)? else {
+        return Ok(());
+    };
+    let _handle = refresher.spawn();
     Ok(())
 }
 

@@ -139,6 +139,7 @@ pub struct MarketRow {
     pub asset: String,
     pub price: Option<f64>,
     pub implied_up: Option<f64>,
+    pub min_order_size: Option<f64>,
     pub start_price: Option<f64>,
     pub inference_5m: Option<f64>,
     pub edge_bps: Option<f64>,
@@ -205,6 +206,7 @@ struct MarketSnapshot {
     volatility_1m: Option<f64>,
     fee_rate_up_bps: Option<f64>,
     fee_rate_down_bps: Option<f64>,
+    min_order_size: Option<f64>,
     last_binance_ms: Option<u64>,
     last_allora_ms: Option<u64>,
 }
@@ -232,6 +234,7 @@ impl MarketSnapshot {
             volatility_1m: None,
             fee_rate_up_bps: None,
             fee_rate_down_bps: None,
+            min_order_size: None,
             last_binance_ms: None,
             last_allora_ms: None,
         }
@@ -488,6 +491,7 @@ async fn refresh_market_snapshots(
             snapshot.start_price = None;
             snapshot.fee_rate_up_bps = None;
             snapshot.fee_rate_down_bps = None;
+            snapshot.min_order_size = None;
             continue;
         };
         snapshot.market_id = Some(window.market_id.clone());
@@ -500,6 +504,7 @@ async fn refresh_market_snapshots(
             _ => None,
         };
         let metadata = redis.get_market_metadata(&window.market_id).await?;
+        snapshot.min_order_size = metadata.min_order_size;
         if let Some(up_token) = metadata.outcome_up_token_id {
             snapshot.up_token_id = Some(up_token.clone());
             let mid = orderbook.mid_price(&up_token).await?;
@@ -817,6 +822,7 @@ fn build_market_row(
         asset: snapshot.asset.clone(),
         price: snapshot.price,
         implied_up,
+        min_order_size: snapshot.min_order_size,
         start_price: snapshot.start_price,
         inference_5m: snapshot.inference_5m,
         edge_bps,

@@ -436,6 +436,27 @@ impl TradingEngine {
         }
 
         if let Some(intent) = best_intent {
+            if let Some(min_size) = metadata.min_order_size {
+                if let Ok(Some(bankroll)) = self.redis.get_float("sys:bankroll:usdc").await {
+                    let required = min_size * intent.implied_prob.max(0.0);
+                    if required > bankroll {
+                        let last = state
+                            .last_min_order_alert_ms
+                            .get(asset)
+                            .copied()
+                            .unwrap_or(0);
+                        if now.saturating_sub(last) > 30_000 {
+                            self.log_alert(
+                                asset,
+                                "bankroll below min order notional; skipping intent",
+                            )
+                            .await;
+                            state.last_min_order_alert_ms.insert(asset.to_string(), now);
+                        }
+                        return Ok(());
+                    }
+                }
+            }
             self.log_intent(asset, &intent).await;
             let _ = self.intent_tx.send(intent).await;
             state.last_intent_ms.insert(asset.to_string(), now);
@@ -586,6 +607,7 @@ struct TraderState {
     last_signal_miss_ms: HashMap<String, u64>,
     last_fee_alert_ms: HashMap<String, u64>,
     last_start_price_alert_ms: HashMap<String, u64>,
+    last_min_order_alert_ms: HashMap<String, u64>,
 }
 
 impl TraderState {
@@ -597,6 +619,7 @@ impl TraderState {
             last_signal_miss_ms: HashMap::new(),
             last_fee_alert_ms: HashMap::new(),
             last_start_price_alert_ms: HashMap::new(),
+            last_min_order_alert_ms: HashMap::new(),
         }
     }
 }

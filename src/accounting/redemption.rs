@@ -41,6 +41,7 @@ use tokio::time::sleep;
 use crate::error::{BankaiError, Result};
 use crate::security::Secrets;
 use crate::storage::redis::RedisManager;
+use crate::accounting::utils::scale_u256;
 
 const DEFAULT_ABI_PATH: &str = "abi/ConditionalTokens.json";
 const DEFAULT_PARENT_COLLECTION_ID: &str =
@@ -1326,26 +1327,6 @@ async fn resolve_fee_data(
 
 fn gwei_to_wei(value: u64) -> U256 {
     U256::from(value) * U256::from(WEI_PER_GWEI)
-}
-
-fn scale_u256(value: U256, decimals: u32) -> Result<f64> {
-    if decimals == 0 {
-        return value.to_string().parse::<f64>().map_err(|_| {
-            BankaiError::InvalidArgument("failed to parse integer balance".to_string())
-        });
-    }
-    let raw = value.to_string();
-    let decimals = decimals as usize;
-    let scaled = if raw.len() <= decimals {
-        let zeros = "0".repeat(decimals - raw.len());
-        format!("0.{zeros}{raw}")
-    } else {
-        let split = raw.len() - decimals;
-        format!("{}.{}", &raw[..split], &raw[split..])
-    };
-    scaled
-        .parse::<f64>()
-        .map_err(|_| BankaiError::InvalidArgument("failed to parse scaled balance".to_string()))
 }
 
 fn condition_id_candidates(condition_id: H256) -> Vec<String> {
