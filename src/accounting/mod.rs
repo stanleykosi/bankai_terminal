@@ -1,5 +1,6 @@
 pub mod bankroll_refresh;
 pub mod keys;
+pub mod no_money;
 pub mod open_orders_refresh;
 /**
  * @purpose

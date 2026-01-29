@@ -50,6 +50,10 @@ const ORACLE_ONLINE_MULTIPLIER: u64 = 3;
 const SIGNAL_HORIZON_MS: u64 = 5 * 60 * 1_000;
 const SIGNAL_TARGET_TOLERANCE_MS: u64 = 40_000;
 const SQRT_5: f64 = 2.236_067_977_5;
+const PAPER_STATS_WINS_KEY: &str = "paper:stats:wins";
+const PAPER_STATS_LOSSES_KEY: &str = "paper:stats:losses";
+const PAPER_STATS_TOTAL_KEY: &str = "paper:stats:total";
+const PAPER_STATS_ACCURACY_KEY: &str = "paper:stats:accuracy_pct";
 
 type UiResult<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -80,6 +84,7 @@ pub struct StatusBarData {
     pub chainlink_online: bool,
     pub allora_online: bool,
     pub polymarket_online: bool,
+    pub no_money_mode: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -96,6 +101,14 @@ pub struct HealthPanelData {
 pub struct FinancialPanelData {
     pub bankroll_usdc: Option<f64>,
     pub pnl_24h: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PaperStatsData {
+    pub wins: f64,
+    pub losses: f64,
+    pub total: f64,
+    pub accuracy_pct: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -155,6 +168,8 @@ pub struct UiSnapshot {
     pub health: HealthPanelData,
     pub financials: FinancialPanelData,
     pub polymarket: PolymarketPanelData,
+    pub paper_stats: Option<PaperStatsData>,
+    pub no_money_mode: bool,
     pub markets: Vec<MarketRow>,
     pub activity_log: Vec<String>,
     pub intent_log: Vec<String>,
@@ -341,6 +356,7 @@ async fn snapshot_loop(
     let mut last_order_state: Option<String> = None;
     let mut chainlink_window_anchor = false;
     let mut active_windows: Vec<ActiveWindowRow> = Vec::new();
+    let mut paper_stats: Option<PaperStatsData> = None;
     let orderbook = redis
         .as_ref()
         .map(|manager| OrderBookStore::new(manager.clone()));
@@ -409,6 +425,36 @@ async fn snapshot_loop(
                         Ok(entries) => order_log = entries,
                         Err(error) => tracing::warn!(?error, "failed to read order log from redis"),
                     }
+                    if config.load().execution.no_money_mode {
+                        let wins = redis
+                            .get_float(PAPER_STATS_WINS_KEY)
+                            .await
+                            .unwrap_or(None)
+                            .unwrap_or(0.0);
+                        let losses = redis
+                            .get_float(PAPER_STATS_LOSSES_KEY)
+                            .await
+                            .unwrap_or(None)
+                            .unwrap_or(0.0);
+                        let total = redis
+                            .get_float(PAPER_STATS_TOTAL_KEY)
+                            .await
+                            .unwrap_or(None)
+                            .unwrap_or(0.0);
+                        let accuracy = redis
+                            .get_float(PAPER_STATS_ACCURACY_KEY)
+                            .await
+                            .unwrap_or(None)
+                            .unwrap_or(0.0);
+                        paper_stats = Some(PaperStatsData {
+                            wins,
+                            losses,
+                            total,
+                            accuracy_pct: accuracy,
+                        });
+                    } else {
+                        paper_stats = None;
+                    }
                     if let Some(wallet_key) = wallet_key.as_ref() {
                         let key = open_orders_key(wallet_key);
                         match redis.scard(&key).await {
@@ -454,6 +500,7 @@ async fn snapshot_loop(
                     last_order_state.clone(),
                     chainlink_window_anchor,
                     active_windows.clone(),
+                    paper_stats.clone(),
                 );
                 if sender.send(UiCommand::Snapshot(snapshot)).is_err() {
                     break;
@@ -664,6 +711,7 @@ fn build_snapshot(
     last_order_state: Option<String>,
     chainlink_window_anchor: bool,
     active_windows: Vec<ActiveWindowRow>,
+    paper_stats: Option<PaperStatsData>,
 ) -> UiSnapshot {
     let config = config.load_full();
     let risk_snapshot = risk.snapshot();
@@ -676,7 +724,7 @@ fn build_snapshot(
         chainlink_online: is_oracle_online(
             now_ms,
             last_chainlink_update_ms(market_state),
-            Duration::from_secs(5),
+            chainlink_online_window(&config),
         ),
         allora_online: is_oracle_online(
             now_ms,
@@ -684,6 +732,7 @@ fn build_snapshot(
             allora_online_window(&config),
         ),
         polymarket_online: is_polymarket_online(polymarket_last_refresh),
+        no_money_mode: config.execution.no_money_mode,
     };
 
     let health = HealthPanelData {
@@ -731,6 +780,8 @@ fn build_snapshot(
         health,
         financials,
         polymarket: polymarket_panel,
+        paper_stats,
+        no_money_mode: config.execution.no_money_mode,
         markets,
         activity_log,
         intent_log,
@@ -926,6 +977,10 @@ fn allora_online_window(config: &Config) -> Duration {
     }
 }
 
+fn chainlink_online_window(_config: &Config) -> Duration {
+    Duration::from_secs(60)
+}
+
 fn ui_loop(receiver: mpsc::Receiver<UiCommand>, config: TuiConfig) -> UiResult<()> {
     let mut stdout = io::stdout();
     let _guard = TerminalGuard::enter(&mut stdout)?;
@@ -941,6 +996,7 @@ fn ui_loop(receiver: mpsc::Receiver<UiCommand>, config: TuiConfig) -> UiResult<(
             chainlink_online: false,
             allora_online: false,
             polymarket_online: false,
+            no_money_mode: false,
         },
         health: HealthPanelData {
             halted: false,
@@ -959,6 +1015,8 @@ fn ui_loop(receiver: mpsc::Receiver<UiCommand>, config: TuiConfig) -> UiResult<(
             asset_count: None,
             last_refresh: None,
         },
+        paper_stats: None,
+        no_money_mode: false,
         markets: Vec::new(),
         activity_log: Vec::new(),
         intent_log: Vec::new(),

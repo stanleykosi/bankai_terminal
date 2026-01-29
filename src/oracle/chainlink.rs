@@ -112,7 +112,10 @@ impl ChainlinkOracle {
                     message = reader.next() => {
                         match message {
                             Some(Ok(Message::Text(text))) => {
-                                if let Some(event) = parse_event(&text)? {
+                                if let Some(mut event) = parse_event(&text)? {
+                                    if event.event_time_ms == 0 {
+                                        event.event_time_ms = now_ms().unwrap_or(0);
+                                    }
                                     let asset_key = canonical_asset(&event.symbol);
                                     let state = states
                                         .entry(asset_key.clone())
@@ -125,6 +128,19 @@ impl ChainlinkOracle {
                                             let now = now_ms().unwrap_or(0);
                                             let _ = redis
                                                 .set_asset_start_price(&asset_key, start_ms, price, now)
+                                                .await;
+                                        }
+                                        if let (Some(redis), Some((end_ms, price))) = (
+                                            self.config.redis.as_ref(),
+                                            state.take_end_price_if_ready(
+                                                window,
+                                                event.event_time_ms,
+                                                event.price,
+                                            ),
+                                        ) {
+                                            let now = now_ms().unwrap_or(0);
+                                            let _ = redis
+                                                .set_asset_end_price(&asset_key, end_ms, price, now)
                                                 .await;
                                         }
                                     }
@@ -209,6 +225,7 @@ struct AssetState {
     candle_interval_ms: u64,
     anchor_start_ms: Option<u64>,
     recorded_start_ms: Option<u64>,
+    recorded_end_ms: Option<u64>,
 }
 
 impl AssetState {
@@ -222,6 +239,7 @@ impl AssetState {
             candle_interval_ms: candle_interval.as_millis() as u64,
             anchor_start_ms: None,
             recorded_start_ms: None,
+            recorded_end_ms: None,
         }
     }
 
@@ -239,6 +257,7 @@ impl AssetState {
             self.candle_open_price = None;
             self.volatility.reset(Duration::from_millis(interval_ms));
             self.recorded_start_ms = None;
+            self.recorded_end_ms = None;
         }
     }
 
@@ -256,6 +275,26 @@ impl AssetState {
         }
         self.recorded_start_ms = Some(start_ms);
         Some((start_ms, price))
+    }
+
+    fn take_end_price_if_ready(
+        &mut self,
+        window: &AssetWindow,
+        event_time_ms: u64,
+        price: f64,
+    ) -> Option<(u64, f64)> {
+        if price <= 0.0 {
+            return None;
+        }
+        let end_ms = window.end_time_ms;
+        if self.recorded_end_ms == Some(end_ms) {
+            return None;
+        }
+        if event_time_ms < end_ms {
+            return None;
+        }
+        self.recorded_end_ms = Some(end_ms);
+        Some((end_ms, price))
     }
 
     fn apply_event(
@@ -389,7 +428,7 @@ fn subscribe_payload(symbols: &[String]) -> Result<String> {
             let filters = format!(r#"{{"symbol":"{normalized}"}}"#);
             serde_json::json!({
                 "topic": TOPIC,
-                "type": "*",
+                "type": "update",
                 "filters": filters
             })
         })

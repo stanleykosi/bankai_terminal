@@ -128,7 +128,7 @@ impl TradingEngine {
             return Ok(());
         }
         let config = self.config.load_full();
-        if !config.execution.enable_trading {
+        if !config.execution.enable_trading && !config.execution.no_money_mode {
             return Ok(());
         }
 
@@ -436,24 +436,26 @@ impl TradingEngine {
         }
 
         if let Some(intent) = best_intent {
-            if let Some(min_size) = metadata.min_order_size {
-                if let Ok(Some(bankroll)) = self.redis.get_float("sys:bankroll:usdc").await {
-                    let required = min_size * intent.implied_prob.max(0.0);
-                    if required > bankroll {
-                        let last = state
-                            .last_min_order_alert_ms
-                            .get(asset)
-                            .copied()
-                            .unwrap_or(0);
-                        if now.saturating_sub(last) > 30_000 {
-                            self.log_alert(
-                                asset,
-                                "bankroll below min order notional; skipping intent",
-                            )
-                            .await;
-                            state.last_min_order_alert_ms.insert(asset.to_string(), now);
+            if !config.execution.no_money_mode {
+                if let Some(min_size) = metadata.min_order_size {
+                    if let Ok(Some(bankroll)) = self.redis.get_float("sys:bankroll:usdc").await {
+                        let required = min_size * intent.implied_prob.max(0.0);
+                        if required > bankroll {
+                            let last = state
+                                .last_min_order_alert_ms
+                                .get(asset)
+                                .copied()
+                                .unwrap_or(0);
+                            if now.saturating_sub(last) > 30_000 {
+                                self.log_alert(
+                                    asset,
+                                    "bankroll below min order notional; skipping intent",
+                                )
+                                .await;
+                                state.last_min_order_alert_ms.insert(asset.to_string(), now);
+                            }
+                            return Ok(());
                         }
-                        return Ok(());
                     }
                 }
             }

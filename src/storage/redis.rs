@@ -40,6 +40,7 @@ const ASSET_WINDOW_NEXT_PREFIX: &str = "polymarket:window_next:";
 const ASSET_WINDOW_CACHE_PREFIX: &str = "polymarket:windows:";
 const FEE_RATE_PREFIX: &str = "polymarket:fee_rate:";
 const ASSET_START_PRICE_PREFIX: &str = "polymarket:start_price:";
+const ASSET_END_PRICE_PREFIX: &str = "polymarket:end_price:";
 const ORDERBOOK_TS_PREFIX: &str = "polymarket:book_ts:";
 const LAST_TRADE_PREFIX: &str = "polymarket:last_trade:";
 const TOKEN_MARKET_PREFIX: &str = "polymarket:token_market:";
@@ -501,6 +502,34 @@ impl RedisManager {
         }
     }
 
+    pub async fn set_asset_end_price(
+        &self,
+        asset: &str,
+        end_time_ms: u64,
+        price: f64,
+        updated_at_ms: u64,
+    ) -> Result<()> {
+        let key = asset_end_price_key(asset);
+        let mut conn = self.connection.clone();
+        conn.hset::<_, _, _, ()>(key.as_str(), "endTimeMs", end_time_ms as i64)
+            .await?;
+        conn.hset::<_, _, _, ()>(key.as_str(), "price", price)
+            .await?;
+        conn.hset::<_, _, _, ()>(key.as_str(), "updatedAtMs", updated_at_ms as i64)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn get_asset_end_price(&self, asset: &str) -> Result<Option<(u64, f64)>> {
+        let key = asset_end_price_key(asset);
+        let end_time_ms = self.hget_i64(&key, "endTimeMs").await?;
+        let price = self.hget_float(&key, "price").await?;
+        match (end_time_ms, price) {
+            (Some(end), Some(price)) if end > 0 && price > 0.0 => Ok(Some((end as u64, price))),
+            _ => Ok(None),
+        }
+    }
+
     pub async fn set_polymarket_asset_ids(&self, asset_ids: &[String]) -> Result<()> {
         self.replace_set(POLYMARKET_ASSET_IDS_KEY, asset_ids).await
     }
@@ -593,6 +622,23 @@ impl RedisManager {
         Ok(())
     }
 
+    pub async fn set_string(&self, key: &str, value: &str) -> Result<()> {
+        let mut conn = self.connection.clone();
+        conn.set::<_, _, ()>(key, value).await?;
+        Ok(())
+    }
+
+    pub async fn get_string(&self, key: &str) -> Result<Option<String>> {
+        let mut conn = self.connection.clone();
+        Ok(conn.get(key).await?)
+    }
+
+    pub async fn del(&self, key: &str) -> Result<()> {
+        let mut conn = self.connection.clone();
+        conn.del::<_, ()>(key).await?;
+        Ok(())
+    }
+
     pub async fn hgetall_f64(&self, key: &str) -> Result<HashMap<String, f64>> {
         let mut conn = self.connection.clone();
         Ok(conn.hgetall(key).await?)
@@ -679,6 +725,10 @@ fn fee_rate_key(token_id: &str) -> String {
 
 fn asset_start_price_key(asset: &str) -> String {
     format!("{ASSET_START_PRICE_PREFIX}{asset}")
+}
+
+fn asset_end_price_key(asset: &str) -> String {
+    format!("{ASSET_END_PRICE_PREFIX}{asset}")
 }
 
 fn orderbook_ts_key(token_id: &str) -> String {

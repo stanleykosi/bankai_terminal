@@ -16,7 +16,7 @@ use ratatui::Frame;
 use serde_json::Value;
 
 use super::{
-    ActiveWindowRow, FinancialPanelData, HealthPanelData, MarketMode, MarketRow,
+    ActiveWindowRow, FinancialPanelData, HealthPanelData, MarketMode, MarketRow, PaperStatsData,
     PolymarketPanelData, StatusBarData, UiSnapshot,
 };
 use crate::engine::risk::HaltReason;
@@ -46,15 +46,28 @@ pub fn render_dashboard(frame: &mut Frame, snapshot: &UiSnapshot) {
     render_markets(frame, left[1], &snapshot.markets);
     render_activity_log(frame, left[2], &snapshot.activity_log);
 
-    let right = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage(24),
-            Constraint::Percentage(20),
-            Constraint::Percentage(26),
-            Constraint::Percentage(30),
-        ])
-        .split(body[1]);
+    let right = if snapshot.no_money_mode {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Percentage(22),
+                Constraint::Percentage(16),
+                Constraint::Percentage(16),
+                Constraint::Percentage(22),
+                Constraint::Percentage(24),
+            ])
+            .split(body[1])
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Percentage(24),
+                Constraint::Percentage(20),
+                Constraint::Percentage(26),
+                Constraint::Percentage(30),
+            ])
+            .split(body[1])
+    };
 
     render_system_panel(
         frame,
@@ -64,9 +77,40 @@ pub fn render_dashboard(frame: &mut Frame, snapshot: &UiSnapshot) {
         &snapshot.financials,
         &snapshot.polymarket,
     );
-    render_active_windows(frame, right[1], &snapshot.active_windows);
-    render_pipeline(frame, right[2], snapshot);
-    render_order_tape(frame, right[3], snapshot);
+    if snapshot.no_money_mode {
+        render_paper_stats(frame, right[1], snapshot.paper_stats.as_ref());
+        render_active_windows(frame, right[2], &snapshot.active_windows);
+        render_pipeline(frame, right[3], snapshot);
+        render_order_tape(frame, right[4], snapshot);
+    } else {
+        render_active_windows(frame, right[1], &snapshot.active_windows);
+        render_pipeline(frame, right[2], snapshot);
+        render_order_tape(frame, right[3], snapshot);
+    }
+}
+
+fn render_paper_stats(frame: &mut Frame, area: Rect, stats: Option<&PaperStatsData>) {
+    let block = Block::default()
+        .title(" Paper Stats ")
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .style(Style::default().fg(Color::Cyan));
+    let mut lines = Vec::new();
+    if let Some(stats) = stats {
+        lines.push(Line::from(format!("Wins: {:.0}", stats.wins)));
+        lines.push(Line::from(format!("Losses: {:.0}", stats.losses)));
+        lines.push(Line::from(format!("Total: {:.0}", stats.total)));
+        lines.push(Line::from(format!("Accuracy: {:.2}%", stats.accuracy_pct)));
+    } else {
+        lines.push(Line::from("Wins: --"));
+        lines.push(Line::from("Losses: --"));
+        lines.push(Line::from("Total: --"));
+        lines.push(Line::from("Accuracy: --"));
+    }
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .alignment(Alignment::Left);
+    frame.render_widget(paragraph, area);
 }
 
 fn render_status_bar(frame: &mut Frame, area: Rect, status: &StatusBarData) {
@@ -94,6 +138,18 @@ fn render_status_bar(frame: &mut Frame, area: Rect, status: &StatusBarData) {
         "ONLINE"
     } else {
         "OFFLINE"
+    };
+    let mode_label = if status.no_money_mode {
+        "PAPER"
+    } else {
+        "LIVE"
+    };
+    let mode_style = if status.no_money_mode {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Green)
     };
 
     let spans = vec![
@@ -127,6 +183,10 @@ fn render_status_bar(frame: &mut Frame, area: Rect, status: &StatusBarData) {
         Span::styled("Polymarket", Style::default().fg(Color::DarkGray)),
         Span::raw(": "),
         Span::styled(polymarket_label, oracle_style(status.polymarket_online)),
+        Span::raw("  "),
+        Span::styled("Mode", Style::default().fg(Color::DarkGray)),
+        Span::raw(": "),
+        Span::styled(mode_label, mode_style),
     ];
 
     let paragraph = Paragraph::new(Line::from(spans))

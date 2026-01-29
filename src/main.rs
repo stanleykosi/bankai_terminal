@@ -11,6 +11,7 @@
 
 use arc_swap::ArcSwap;
 use bankai_terminal::accounting::bankroll_refresh::BankrollRefresher;
+use bankai_terminal::accounting::no_money::spawn_no_money_tracker;
 use bankai_terminal::accounting::open_orders_refresh::OpenOrdersRefresher;
 /**
  * @purpose
@@ -137,7 +138,7 @@ async fn main() -> Result<()> {
     if !preflight_ok {
         risk.manual_halt();
     }
-    if !bankroll_ready {
+    if !bankroll_ready && !config.execution.no_money_mode {
         tracing::warn!(
             "bankroll missing or zero at startup; trading halted until funds are detected"
         );
@@ -181,6 +182,7 @@ async fn main() -> Result<()> {
     spawn_open_orders_refresher(&config, &secrets).await?;
     spawn_pnl_monitor(&config, &secrets).await?;
     spawn_redemption_listener(&config, &secrets).await?;
+    spawn_no_money(&config, config_state.clone()).await?;
 
     tracing::info!("engine running");
     tokio::signal::ctrl_c().await?;
@@ -503,6 +505,7 @@ async fn spawn_execution_pipeline(
             backoff_max_ms: config.execution.relayer_backoff_max_ms,
             idempotency_ttl_secs: config.execution.idempotency_ttl_secs,
             cancel_before_replace: config.execution.cancel_before_replace,
+            no_money_mode: config.execution.no_money_mode,
             ..Default::default()
         },
         relayer,
@@ -534,6 +537,22 @@ async fn spawn_allowance_manager(config: &Arc<Config>, secrets: &security::Secre
         return Ok(());
     };
     let _handle = manager.spawn();
+    Ok(())
+}
+
+async fn spawn_no_money(config: &Arc<Config>, config_state: Arc<ArcSwap<Config>>) -> Result<()> {
+    if !config.execution.no_money_mode {
+        return Ok(());
+    }
+    let redis_url = match std::env::var("REDIS_URL") {
+        Ok(value) => value,
+        Err(_) => {
+            tracing::warn!("REDIS_URL not set; no-money tracking disabled");
+            return Ok(());
+        }
+    };
+    let redis = RedisManager::new(&redis_url).await?;
+    let _handle = spawn_no_money_tracker(config_state, redis);
     Ok(())
 }
 

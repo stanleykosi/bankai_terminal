@@ -49,6 +49,7 @@
     "allowance_target_usdc": 1000.0,
     "allowance_check_interval_secs": 600,
     "trade_reconcile_interval_secs": 10,
+    "no_money_mode": false,
     "take_profit_bps": 150.0,
     "stop_loss_bps": 200.0,
     "trailing_stop_bps": 120.0,

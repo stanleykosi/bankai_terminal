@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 
+use crate::accounting::no_money::record_no_money_intent;
 use crate::engine::types::{TradeIntent, TradeMode, TradeSide};
 use crate::error::{BankaiError, Result};
 use crate::execution::cancel::CancelClient;
@@ -44,6 +45,7 @@ pub struct ExecutionOrchestratorConfig {
     pub backoff_max_ms: u64,
     pub idempotency_ttl_secs: u64,
     pub cancel_before_replace: bool,
+    pub no_money_mode: bool,
 }
 
 impl Default for ExecutionOrchestratorConfig {
@@ -56,6 +58,7 @@ impl Default for ExecutionOrchestratorConfig {
             backoff_max_ms: 500,
             idempotency_ttl_secs: 30,
             cancel_before_replace: true,
+            no_money_mode: false,
         }
     }
 }
@@ -171,6 +174,20 @@ impl ExecutionOrchestrator {
                 );
                 return Ok(());
             }
+        }
+
+        if self.config.no_money_mode {
+            if let Some(redis) = self.activity_redis.as_ref() {
+                let _ = record_no_money_intent(redis, &intent).await;
+                self.log_activity_event(format!(
+                    "[PAPER] intent captured market={} mode={} edge_bps={:.1}",
+                    intent.market_id,
+                    trade_mode_label(intent.mode),
+                    intent.edge_bps
+                ))
+                .await;
+            }
+            return Ok(());
         }
 
         if intent.mode == TradeMode::Ladder && self.config.cancel_before_replace {
