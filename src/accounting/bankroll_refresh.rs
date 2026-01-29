@@ -12,12 +12,12 @@ use ethers_core::types::{Address, Bytes, TransactionRequest, U256};
 use ethers_providers::{Http, Middleware, Provider};
 use std::time::Duration;
 
+use crate::accounting::utils::scale_u256;
 use crate::config::Config;
 use crate::error::{BankaiError, Result};
 use crate::execution::signer::Eip712Signer;
 use crate::security::Secrets;
 use crate::storage::redis::RedisManager;
-use crate::accounting::utils::scale_u256;
 
 const DEFAULT_CHAIN_ID: u64 = 137;
 const DEFAULT_COLLATERAL_DECIMALS: u32 = 6;

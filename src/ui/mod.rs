@@ -28,7 +28,7 @@ use crate::accounting::keys::PNL_24H_KEY;
 use crate::config::{Config, ExecutionConfig, StrategyConfig};
 use crate::engine::analysis::snipe_threshold_bps;
 use crate::engine::risk::{HaltReason, RiskState};
-use crate::engine::types::{AlloraMarketUpdate, BinanceMarketUpdate, MarketUpdate, MarketWindow};
+use crate::engine::types::{AlloraMarketUpdate, ChainlinkMarketUpdate, MarketUpdate, MarketWindow};
 use crate::error::Result;
 use crate::storage::orderbook::{BookSide, OrderBookStore};
 use crate::storage::redis::RedisManager;
@@ -77,7 +77,7 @@ pub struct StatusBarData {
     pub uptime: Duration,
     pub halted: bool,
     pub halt_reason: HaltReason,
-    pub binance_online: bool,
+    pub chainlink_online: bool,
     pub allora_online: bool,
     pub polymarket_online: bool,
 }
@@ -89,7 +89,7 @@ pub struct HealthPanelData {
     pub latency_ms: u64,
     pub clock_drift_ms: i64,
     pub consecutive_losses: u32,
-    pub binance_window_anchor: bool,
+    pub chainlink_window_anchor: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -207,7 +207,7 @@ struct MarketSnapshot {
     fee_rate_up_bps: Option<f64>,
     fee_rate_down_bps: Option<f64>,
     min_order_size: Option<f64>,
-    last_binance_ms: Option<u64>,
+    last_chainlink_ms: Option<u64>,
     last_allora_ms: Option<u64>,
 }
 
@@ -235,12 +235,12 @@ impl MarketSnapshot {
             fee_rate_up_bps: None,
             fee_rate_down_bps: None,
             min_order_size: None,
-            last_binance_ms: None,
+            last_chainlink_ms: None,
             last_allora_ms: None,
         }
     }
 
-    fn apply_binance(&mut self, update: &BinanceMarketUpdate) {
+    fn apply_chainlink(&mut self, update: &ChainlinkMarketUpdate) {
         self.price = resolve_price(update);
         self.volatility_1m = update.volatility_1m;
         let event_time = if update.event_time_ms > 0 {
@@ -248,7 +248,7 @@ impl MarketSnapshot {
         } else {
             now_ms().unwrap_or(0)
         };
-        self.last_binance_ms = Some(event_time);
+        self.last_chainlink_ms = Some(event_time);
     }
 
     fn apply_allora(&mut self, update: &AlloraMarketUpdate) {
@@ -339,7 +339,7 @@ async fn snapshot_loop(
     let mut order_log: Vec<String> = Vec::new();
     let mut open_orders: Option<usize> = None;
     let mut last_order_state: Option<String> = None;
-    let mut binance_window_anchor = false;
+    let mut chainlink_window_anchor = false;
     let mut active_windows: Vec<ActiveWindowRow> = Vec::new();
     let orderbook = redis
         .as_ref()
@@ -350,12 +350,12 @@ async fn snapshot_loop(
             message = receiver.recv() => {
                 match message {
                     Ok(update) => match update {
-                        MarketUpdate::Binance(update) => {
+                        MarketUpdate::Chainlink(update) => {
                             let key = canonical_asset(&update.asset);
                             let entry = market_state
                                 .entry(key.clone())
                                 .or_insert_with(|| MarketSnapshot::new(key.clone()));
-                            entry.apply_binance(&update);
+                            entry.apply_chainlink(&update);
                         }
                         MarketUpdate::Allora(update) => {
                             let key = canonical_asset(&update.asset);
@@ -390,7 +390,7 @@ async fn snapshot_loop(
                         }
                         Err(error) => tracing::warn!(?error, "failed to read polymarket asset ids from redis"),
                     }
-                    binance_window_anchor = redis.get_asset_window("BTC").await?.is_some()
+                    chainlink_window_anchor = redis.get_asset_window("BTC").await?.is_some()
                         || redis.get_asset_window("ETH").await?.is_some()
                         || redis.get_asset_window("SOL").await?.is_some();
                     match load_active_windows(redis).await {
@@ -452,7 +452,7 @@ async fn snapshot_loop(
                     order_log.clone(),
                     open_orders,
                     last_order_state.clone(),
-                    binance_window_anchor,
+                    chainlink_window_anchor,
                     active_windows.clone(),
                 );
                 if sender.send(UiCommand::Snapshot(snapshot)).is_err() {
@@ -662,7 +662,7 @@ fn build_snapshot(
     order_log: Vec<String>,
     open_orders: Option<usize>,
     last_order_state: Option<String>,
-    binance_window_anchor: bool,
+    chainlink_window_anchor: bool,
     active_windows: Vec<ActiveWindowRow>,
 ) -> UiSnapshot {
     let config = config.load_full();
@@ -673,9 +673,9 @@ fn build_snapshot(
         uptime: start_time.elapsed(),
         halted: risk_snapshot.halted,
         halt_reason: risk_snapshot.reason,
-        binance_online: is_oracle_online(
+        chainlink_online: is_oracle_online(
             now_ms,
-            last_binance_update_ms(market_state),
+            last_chainlink_update_ms(market_state),
             Duration::from_secs(5),
         ),
         allora_online: is_oracle_online(
@@ -692,7 +692,7 @@ fn build_snapshot(
         latency_ms: risk_snapshot.last_latency_ms,
         clock_drift_ms: risk_snapshot.clock_drift_ms,
         consecutive_losses: risk_snapshot.consecutive_losses,
-        binance_window_anchor,
+        chainlink_window_anchor,
     };
 
     let financials = FinancialPanelData {
@@ -750,7 +750,7 @@ fn build_market_row(
     config: &Config,
     now_ms: u64,
 ) -> MarketRow {
-    let last_update_ms = snapshot.last_binance_ms.max(snapshot.last_allora_ms);
+    let last_update_ms = snapshot.last_chainlink_ms.max(snapshot.last_allora_ms);
 
     let implied_up = snapshot.implied_up;
     let _implied_down = snapshot
@@ -892,10 +892,10 @@ fn open_orders_key(wallet_key: &str) -> String {
     format!("orders:open:{wallet_key}")
 }
 
-fn last_binance_update_ms(state: &HashMap<String, MarketSnapshot>) -> Option<u64> {
+fn last_chainlink_update_ms(state: &HashMap<String, MarketSnapshot>) -> Option<u64> {
     state
         .values()
-        .filter_map(|snapshot| snapshot.last_binance_ms)
+        .filter_map(|snapshot| snapshot.last_chainlink_ms)
         .max()
 }
 
@@ -938,7 +938,7 @@ fn ui_loop(receiver: mpsc::Receiver<UiCommand>, config: TuiConfig) -> UiResult<(
             uptime: Duration::from_secs(0),
             halted: false,
             halt_reason: HaltReason::None,
-            binance_online: false,
+            chainlink_online: false,
             allora_online: false,
             polymarket_online: false,
         },
@@ -948,7 +948,7 @@ fn ui_loop(receiver: mpsc::Receiver<UiCommand>, config: TuiConfig) -> UiResult<(
             latency_ms: 0,
             clock_drift_ms: 0,
             consecutive_losses: 0,
-            binance_window_anchor: false,
+            chainlink_window_anchor: false,
         },
         financials: FinancialPanelData {
             bankroll_usdc: None,
@@ -1023,22 +1023,19 @@ fn parse_env_bool(value: &str) -> Option<bool> {
 
 fn canonical_asset(raw: &str) -> String {
     let upper = raw.trim().to_ascii_uppercase();
+    if let Some((base, _)) = upper.split_once('/') {
+        return base.trim().to_string();
+    }
     upper
         .strip_suffix("USDT")
+        .or_else(|| upper.strip_suffix("USD"))
         .map(|value| value.to_string())
-        .unwrap_or(upper.to_string())
+        .unwrap_or(upper)
 }
 
-fn resolve_price(update: &BinanceMarketUpdate) -> Option<f64> {
-    if let Some(value) = update.last_price {
-        if value > 0.0 {
-            return Some(value);
-        }
-    }
-    match (update.best_bid, update.best_ask) {
-        (Some(bid), Some(ask)) if bid > 0.0 && ask > 0.0 => Some((bid + ask) / 2.0),
-        (Some(bid), None) if bid > 0.0 => Some(bid),
-        (None, Some(ask)) if ask > 0.0 => Some(ask),
+fn resolve_price(update: &ChainlinkMarketUpdate) -> Option<f64> {
+    match update.last_price {
+        Some(value) if value > 0.0 => Some(value),
         _ => None,
     }
 }

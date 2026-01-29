@@ -9,7 +9,7 @@ pub mod allora;
  * @notes
  * - Each oracle should emit MarketUpdate events for the engine.
  */
-pub mod binance;
+pub mod chainlink;
 pub mod polymarket_discovery;
 pub mod polymarket_rtds;
 pub mod polymarket_user_ws;

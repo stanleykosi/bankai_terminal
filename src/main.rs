@@ -45,7 +45,7 @@ use bankai_terminal::execution::payload_builder::PolymarketPayloadBuilder;
 use bankai_terminal::execution::relayer::{RelayerClient, RelayerConfig};
 use bankai_terminal::execution::signer::Eip712Signer;
 use bankai_terminal::oracle::allora::{AlloraConsumerTopic, AlloraOracle, AlloraOracleConfig};
-use bankai_terminal::oracle::binance::{BinanceOracle, BinanceOracleConfig};
+use bankai_terminal::oracle::chainlink::{ChainlinkOracle, ChainlinkOracleConfig};
 use bankai_terminal::oracle::polymarket_discovery::{
     PolymarketDiscovery, PolymarketDiscoveryConfig,
 };
@@ -162,7 +162,7 @@ async fn main() -> Result<()> {
     let engine = EngineCore::new(config_state.clone(), risk.clone());
     let _engine_handle = engine.spawn(market_tx.subscribe());
 
-    spawn_binance_oracle(&config, market_tx.clone()).await?;
+    spawn_chainlink_oracle(&config, market_tx.clone()).await?;
     spawn_allora_oracle(&config, market_tx.clone())?;
     spawn_polymarket_oracles(&config).await?;
     let user_ws_enabled = spawn_polymarket_user_ws(&config, &secrets).await?;
@@ -191,32 +191,32 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn spawn_binance_oracle(
+async fn spawn_chainlink_oracle(
     config: &Arc<Config>,
     sender: broadcast::Sender<MarketUpdate>,
 ) -> Result<()> {
-    let symbols = derive_binance_symbols(config);
+    let symbols = derive_chainlink_symbols(config);
     let redis = match std::env::var("REDIS_URL") {
         Ok(url) => match RedisManager::new(&url).await {
             Ok(manager) => Some(manager),
             Err(error) => {
                 tracing::warn!(
                     ?error,
-                    "redis unavailable; binance window alignment disabled"
+                    "redis unavailable; chainlink window alignment disabled"
                 );
                 None
             }
         },
         Err(_) => None,
     };
-    let binance_config = BinanceOracleConfig {
-        endpoint: config.endpoints.binance_ws.clone(),
+    let chainlink_config = ChainlinkOracleConfig {
+        endpoint: config.endpoints.chainlink_ws.clone(),
         symbols,
         candle_interval: Duration::from_secs(60),
         window_refresh_interval: Duration::from_secs(5),
         redis,
     };
-    let oracle = BinanceOracle::new(binance_config);
+    let oracle = ChainlinkOracle::new(chainlink_config);
     let _handle = oracle.spawn(sender);
     Ok(())
 }
@@ -375,13 +375,13 @@ fn derive_user_ws(market_ws: &str) -> Option<String> {
     None
 }
 
-fn derive_binance_symbols(config: &Arc<Config>) -> Vec<String> {
+fn derive_chainlink_symbols(config: &Arc<Config>) -> Vec<String> {
     let mut symbols = Vec::new();
     let mut seen = HashSet::new();
 
     if let Some(allora) = config.allora_consumer.as_ref() {
         for topic in &allora.topics {
-            if let Some(symbol) = asset_to_binance_symbol(&topic.asset) {
+            if let Some(symbol) = asset_to_chainlink_symbol(&topic.asset) {
                 if seen.insert(symbol.clone()) {
                     symbols.push(symbol);
                 }
@@ -390,7 +390,7 @@ fn derive_binance_symbols(config: &Arc<Config>) -> Vec<String> {
     }
 
     if symbols.is_empty() {
-        let defaults = ["btcusdt", "ethusdt", "solusdt", "xrpusdt"];
+        let defaults = ["btc/usd", "eth/usd", "sol/usd"];
         for symbol in defaults {
             symbols.push(symbol.to_string());
         }
@@ -399,15 +399,13 @@ fn derive_binance_symbols(config: &Arc<Config>) -> Vec<String> {
     symbols
 }
 
-fn asset_to_binance_symbol(asset: &str) -> Option<String> {
-    let trimmed = asset.trim().to_ascii_lowercase();
-    if trimmed.is_empty() {
-        return None;
+fn asset_to_chainlink_symbol(asset: &str) -> Option<String> {
+    match asset.trim().to_ascii_uppercase().as_str() {
+        "BTC" => Some("btc/usd".to_string()),
+        "ETH" => Some("eth/usd".to_string()),
+        "SOL" => Some("sol/usd".to_string()),
+        _ => None,
     }
-    if trimmed.ends_with("usdt") {
-        return Some(trimmed);
-    }
-    Some(format!("{trimmed}usdt"))
 }
 
 async fn spawn_execution_pipeline(

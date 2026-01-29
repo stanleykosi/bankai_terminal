@@ -1,6 +1,6 @@
 /**
  * @description
- * Binance oracle for aggTrade and bookTicker streams with rolling volatility + DFO.
+ * Chainlink oracle via Polymarket RTDS crypto_prices_chainlink stream.
  *
  * @dependencies
  * - tokio-tungstenite: websocket client
@@ -8,8 +8,8 @@
  * - serde_json: message parsing
  *
  * @notes
- * - Volatility uses 1-minute rolling stddev of returns.
- * - DFO aligns candle start to epoch-based interval boundaries.
+ * - Volatility uses a rolling window of returns.
+ * - Start price snapshots align to the active market window in Redis.
  */
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
@@ -22,7 +22,7 @@ use crate::engine::types::{ChainlinkMarketUpdate, MarketUpdate};
 use crate::error::{BankaiError, Result};
 use crate::storage::redis::{AssetWindow, RedisManager};
 
-const STREAM_ID: u64 = 1;
+const TOPIC: &str = "crypto_prices_chainlink";
 
 fn compute_jitter(max_ms: u64) -> Result<Duration> {
     if max_ms == 0 {
@@ -39,7 +39,7 @@ fn now_ms() -> Result<u64> {
 }
 
 #[derive(Debug, Clone)]
-pub struct BinanceOracleConfig {
+pub struct ChainlinkOracleConfig {
     pub endpoint: String,
     pub symbols: Vec<String>,
     pub candle_interval: Duration,
@@ -47,19 +47,19 @@ pub struct BinanceOracleConfig {
     pub redis: Option<RedisManager>,
 }
 
-pub struct BinanceOracle {
-    config: BinanceOracleConfig,
+pub struct ChainlinkOracle {
+    config: ChainlinkOracleConfig,
 }
 
-impl BinanceOracle {
-    pub fn new(config: BinanceOracleConfig) -> Self {
+impl ChainlinkOracle {
+    pub fn new(config: ChainlinkOracleConfig) -> Self {
         Self { config }
     }
 
     pub fn spawn(self, sender: broadcast::Sender<MarketUpdate>) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             if let Err(error) = self.run(sender).await {
-                tracing::error!(?error, "binance oracle stopped");
+                tracing::error!(?error, "chainlink oracle stopped");
             }
         })
     }
@@ -69,38 +69,19 @@ impl BinanceOracle {
         let mut asset_windows: HashMap<String, AssetWindow> = HashMap::new();
         let mut window_refresh = tokio::time::interval(self.config.window_refresh_interval);
         let mut backoff = ReconnectBackoff::new();
-        let endpoints = build_ws_endpoints(&self.config.endpoint);
-
-        let mut endpoint_index = 0usize;
-        let mut primary_failures = 0u32;
 
         loop {
-            let endpoint = endpoints
-                .get(endpoint_index)
-                .cloned()
-                .unwrap_or_else(|| self.config.endpoint.clone());
-            tracing::warn!(endpoint = %endpoint, "binance ws connecting");
+            let endpoint = self.config.endpoint.clone();
+            tracing::warn!(endpoint = %endpoint, "chainlink ws connecting");
 
             let ws_stream = match tokio_tungstenite::connect_async(&endpoint).await {
                 Ok((stream, _)) => {
-                    tracing::info!(endpoint = %endpoint, "binance ws connected");
+                    tracing::info!(endpoint = %endpoint, "chainlink ws connected");
                     backoff.reset();
-                    primary_failures = 0;
                     stream
                 }
                 Err(error) => {
-                    tracing::warn!(?error, endpoint = %endpoint, "binance ws connect failed");
-                    if endpoint_index == 0 {
-                        primary_failures += 1;
-                        if primary_failures >= 10 && endpoints.len() > 1 {
-                            endpoint_index = 1;
-                            tracing::warn!(
-                                "binance ws primary failed 10 times; switching to fallback endpoint"
-                            );
-                        }
-                    } else {
-                        endpoint_index = 0;
-                    }
+                    tracing::warn!(?error, endpoint = %endpoint, "chainlink ws connect failed");
                     let delay = backoff.next_delay()?;
                     tokio::time::sleep(delay).await;
                     continue;
@@ -110,7 +91,7 @@ impl BinanceOracle {
             let (mut writer, mut reader) = ws_stream.split();
             let payload = subscribe_payload(&self.config.symbols)?;
             if let Err(error) = writer.send(Message::Text(payload)).await {
-                tracing::warn!(?error, endpoint = %endpoint, "binance ws subscribe failed");
+                tracing::warn!(?error, endpoint = %endpoint, "chainlink ws subscribe failed");
                 let delay = backoff.next_delay()?;
                 tokio::time::sleep(delay).await;
                 continue;
@@ -132,10 +113,9 @@ impl BinanceOracle {
                         match message {
                             Some(Ok(Message::Text(text))) => {
                                 if let Some(event) = parse_event(&text)? {
-                                    let asset = event.symbol().to_string();
-                                    let asset_key = canonical_asset(&asset);
+                                    let asset_key = canonical_asset(&event.symbol);
                                     let state = states
-                                        .entry(asset.clone())
+                                        .entry(asset_key.clone())
                                         .or_insert_with(|| AssetState::new(self.config.candle_interval));
                                     if let Some(window) = asset_windows.get(&asset_key) {
                                         state.set_window(window);
@@ -148,28 +128,28 @@ impl BinanceOracle {
                                                 .await;
                                         }
                                     }
-                                    if let Some(update) = state.apply_event(event)? {
+                                    if let Some(update) = state.apply_event(&asset_key, event)? {
                                         let _ = sender.send(MarketUpdate::Chainlink(update));
                                     }
                                 }
                             }
                             Some(Ok(Message::Ping(payload))) => {
                                 if let Err(error) = writer.send(Message::Pong(payload)).await {
-                                    tracing::warn!(?error, "binance ws pong failed");
+                                    tracing::warn!(?error, "chainlink ws pong failed");
                                     break;
                                 }
                             }
                             Some(Ok(Message::Close(frame))) => {
-                                tracing::warn!(?frame, endpoint = %endpoint, "binance ws closed");
+                                tracing::warn!(?frame, endpoint = %endpoint, "chainlink ws closed");
                                 break;
                             }
                             Some(Ok(_)) => {}
                             Some(Err(error)) => {
-                                tracing::warn!(?error, endpoint = %endpoint, "binance ws error");
+                                tracing::warn!(?error, endpoint = %endpoint, "chainlink ws error");
                                 break;
                             }
                             None => {
-                                tracing::warn!(endpoint = %endpoint, "binance ws stream ended");
+                                tracing::warn!(endpoint = %endpoint, "chainlink ws stream ended");
                                 break;
                             }
                         }
@@ -177,9 +157,6 @@ impl BinanceOracle {
                 }
             }
 
-            if endpoint_index != 0 {
-                endpoint_index = 0;
-            }
             let delay = backoff.next_delay()?;
             tokio::time::sleep(delay).await;
         }
@@ -216,51 +193,15 @@ impl ReconnectBackoff {
     }
 }
 
-fn build_ws_endpoints(primary: &str) -> Vec<String> {
-    let mut endpoints = Vec::new();
-    let primary_trim = primary.trim().trim_end_matches('/');
-    if !primary_trim.is_empty() {
-        endpoints.push(primary_trim.to_string());
-    }
-    for fallback in [
-        "wss://stream.binance.com:443/ws",
-        "wss://data-stream.binance.vision/ws",
-    ] {
-        if !endpoints.iter().any(|entry| entry == fallback) {
-            endpoints.push(fallback.to_string());
-        }
-    }
-    endpoints
-}
-
 #[derive(Debug)]
-enum BinanceEvent {
-    AggTrade {
-        symbol: String,
-        price: f64,
-        event_time_ms: u64,
-    },
-    BookTicker {
-        symbol: String,
-        best_bid: f64,
-        best_ask: f64,
-        event_time_ms: u64,
-    },
-}
-
-impl BinanceEvent {
-    fn symbol(&self) -> &str {
-        match self {
-            Self::AggTrade { symbol, .. } => symbol,
-            Self::BookTicker { symbol, .. } => symbol,
-        }
-    }
+struct ChainlinkEvent {
+    symbol: String,
+    price: f64,
+    event_time_ms: u64,
 }
 
 struct AssetState {
     last_price: Option<f64>,
-    best_bid: Option<f64>,
-    best_ask: Option<f64>,
     volatility: RollingVolatility,
     last_volatility: Option<f64>,
     candle_start_ms: Option<u64>,
@@ -274,8 +215,6 @@ impl AssetState {
     fn new(candle_interval: Duration) -> Self {
         Self {
             last_price: None,
-            best_bid: None,
-            best_ask: None,
             volatility: RollingVolatility::new(candle_interval),
             last_volatility: None,
             candle_start_ms: None,
@@ -319,52 +258,27 @@ impl AssetState {
         Some((start_ms, price))
     }
 
-    fn apply_event(&mut self, event: BinanceEvent) -> Result<Option<ChainlinkMarketUpdate>> {
-        match event {
-            BinanceEvent::AggTrade {
-                symbol,
-                price,
-                event_time_ms,
-            } => {
-                self.update_candle(event_time_ms, price);
-                self.last_price = Some(price);
-                if let Some(vol) = self.volatility.update(price, event_time_ms) {
-                    self.last_volatility = Some(vol);
-                }
-                let dfo = self.candle_open_price.map(|open| (price - open) / open);
-
-                Ok(Some(ChainlinkMarketUpdate {
-                    asset: symbol,
-                    best_bid: self.best_bid,
-                    best_ask: self.best_ask,
-                    last_price: Some(price),
-                    volatility_1m: self.last_volatility,
-                    dfo,
-                    event_time_ms,
-                }))
-            }
-            BinanceEvent::BookTicker {
-                symbol,
-                best_bid,
-                best_ask,
-                event_time_ms,
-            } => {
-                self.best_bid = Some(best_bid);
-                self.best_ask = Some(best_ask);
-
-                Ok(Some(ChainlinkMarketUpdate {
-                    asset: symbol,
-                    best_bid: self.best_bid,
-                    best_ask: self.best_ask,
-                    last_price: self.last_price,
-                    volatility_1m: self.last_volatility,
-                    dfo: self
-                        .last_price
-                        .and_then(|price| self.candle_open_price.map(|open| (price - open) / open)),
-                    event_time_ms,
-                }))
-            }
+    fn apply_event(
+        &mut self,
+        asset: &str,
+        event: ChainlinkEvent,
+    ) -> Result<Option<ChainlinkMarketUpdate>> {
+        self.update_candle(event.event_time_ms, event.price);
+        self.last_price = Some(event.price);
+        if let Some(vol) = self.volatility.update(event.price, event.event_time_ms) {
+            self.last_volatility = Some(vol);
         }
+        let dfo = self
+            .candle_open_price
+            .map(|open| (event.price - open) / open);
+
+        Ok(Some(ChainlinkMarketUpdate {
+            asset: asset.to_string(),
+            last_price: Some(event.price),
+            volatility_1m: self.last_volatility,
+            dfo,
+            event_time_ms: event.event_time_ms,
+        }))
     }
 
     fn update_candle(&mut self, timestamp_ms: u64, price: f64) {
@@ -434,10 +348,14 @@ impl RollingVolatility {
 
 fn canonical_asset(raw: &str) -> String {
     let upper = raw.trim().to_ascii_uppercase();
+    if let Some((base, _)) = upper.split_once('/') {
+        return base.trim().to_string();
+    }
     upper
         .strip_suffix("USDT")
+        .or_else(|| upper.strip_suffix("USD"))
         .map(|value| value.to_string())
-        .unwrap_or(upper.to_string())
+        .unwrap_or(upper)
 }
 
 fn compute_stddev(samples: &VecDeque<(u64, f64)>) -> Option<f64> {
@@ -459,94 +377,71 @@ fn compute_stddev(samples: &VecDeque<(u64, f64)>) -> Option<f64> {
 }
 
 fn subscribe_payload(symbols: &[String]) -> Result<String> {
-    let params: Vec<String> = symbols
-        .iter()
-        .map(|symbol| symbol.to_ascii_lowercase())
-        .flat_map(|symbol| vec![format!("{symbol}@aggTrade"), format!("{symbol}@bookTicker")])
-        .collect();
-
-    if params.is_empty() {
+    if symbols.is_empty() {
         return Err(BankaiError::InvalidArgument(
-            "binance oracle requires at least one symbol".to_string(),
+            "chainlink oracle requires at least one symbol".to_string(),
         ));
     }
-
+    let subscriptions: Vec<Value> = symbols
+        .iter()
+        .map(|symbol| {
+            let normalized = symbol.trim().to_ascii_lowercase();
+            let filters = format!(r#"{{"symbol":"{normalized}"}}"#);
+            serde_json::json!({
+                "topic": TOPIC,
+                "type": "*",
+                "filters": filters
+            })
+        })
+        .collect();
     let payload = serde_json::json!({
-        "method": "SUBSCRIBE",
-        "params": params,
-        "id": STREAM_ID
+        "action": "subscribe",
+        "subscriptions": subscriptions
     });
     Ok(payload.to_string())
 }
 
-fn parse_event(text: &str) -> Result<Option<BinanceEvent>> {
+fn parse_event(text: &str) -> Result<Option<ChainlinkEvent>> {
     let raw: Value = serde_json::from_str(text)?;
-    let payload = match raw.get("data") {
-        Some(data) => data,
-        None => &raw,
-    };
-    let event_type = payload.get("e").and_then(|value| value.as_str());
-    match event_type {
-        Some("aggTrade") => parse_agg_trade(payload).map(Some),
-        Some("bookTicker") => parse_book_ticker(payload).map(Some),
-        _ => Ok(None),
+    let topic = raw
+        .get("topic")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    if topic != TOPIC {
+        return Ok(None);
     }
-}
-
-fn parse_agg_trade(payload: &Value) -> Result<BinanceEvent> {
+    let event_type = raw.get("type").and_then(|value| value.as_str());
+    if !matches!(event_type, Some("update") | Some("*") | None) {
+        return Ok(None);
+    }
+    let payload = raw
+        .get("payload")
+        .ok_or_else(|| BankaiError::InvalidArgument("chainlink payload missing".to_string()))?;
     let symbol = payload
-        .get("s")
+        .get("symbol")
         .and_then(|value| value.as_str())
-        .ok_or_else(|| BankaiError::InvalidArgument("aggTrade missing symbol".to_string()))?;
-    let price_str = payload
-        .get("p")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| BankaiError::InvalidArgument("aggTrade missing price".to_string()))?;
+        .ok_or_else(|| BankaiError::InvalidArgument("chainlink symbol missing".to_string()))?;
+    let price = match payload.get("value") {
+        Some(value) if value.is_number() => value.as_f64().unwrap_or(0.0),
+        Some(value) if value.is_string() => value
+            .as_str()
+            .unwrap_or_default()
+            .parse::<f64>()
+            .unwrap_or(0.0),
+        _ => 0.0,
+    };
+    if price <= 0.0 {
+        return Ok(None);
+    }
     let event_time_ms = payload
-        .get("T")
-        .or_else(|| payload.get("E"))
+        .get("timestamp")
+        .or_else(|| raw.get("timestamp"))
         .and_then(|value| value.as_u64())
-        .ok_or_else(|| BankaiError::InvalidArgument("aggTrade missing timestamp".to_string()))?;
-    let price = price_str
-        .parse::<f64>()
-        .map_err(|_| BankaiError::InvalidArgument("aggTrade price not a float".to_string()))?;
+        .unwrap_or(0);
 
-    Ok(BinanceEvent::AggTrade {
+    Ok(Some(ChainlinkEvent {
         symbol: symbol.to_string(),
         price,
         event_time_ms,
-    })
-}
-
-fn parse_book_ticker(payload: &Value) -> Result<BinanceEvent> {
-    let symbol = payload
-        .get("s")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| BankaiError::InvalidArgument("bookTicker missing symbol".to_string()))?;
-    let best_bid_str = payload
-        .get("b")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| BankaiError::InvalidArgument("bookTicker missing bid".to_string()))?;
-    let best_ask_str = payload
-        .get("a")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| BankaiError::InvalidArgument("bookTicker missing ask".to_string()))?;
-    let event_time_ms = payload
-        .get("E")
-        .and_then(|value| value.as_u64())
-        .ok_or_else(|| BankaiError::InvalidArgument("bookTicker missing timestamp".to_string()))?;
-
-    let best_bid = best_bid_str
-        .parse::<f64>()
-        .map_err(|_| BankaiError::InvalidArgument("bookTicker bid not a float".to_string()))?;
-    let best_ask = best_ask_str
-        .parse::<f64>()
-        .map_err(|_| BankaiError::InvalidArgument("bookTicker ask not a float".to_string()))?;
-
-    Ok(BinanceEvent::BookTicker {
-        symbol: symbol.to_string(),
-        best_bid,
-        best_ask,
-        event_time_ms,
-    })
+    }))
 }

@@ -10,7 +10,7 @@
  */
 #[derive(Debug, Clone)]
 pub enum MarketUpdate {
-    Binance(BinanceMarketUpdate),
+    Chainlink(ChainlinkMarketUpdate),
     Allora(AlloraMarketUpdate),
 }
 
@@ -49,10 +49,8 @@ pub struct TradeIntent {
 }
 
 #[derive(Debug, Clone)]
-pub struct BinanceMarketUpdate {
+pub struct ChainlinkMarketUpdate {
     pub asset: String,
-    pub best_bid: Option<f64>,
-    pub best_ask: Option<f64>,
     pub last_price: Option<f64>,
     pub volatility_1m: Option<f64>,
     pub dfo: Option<f64>,

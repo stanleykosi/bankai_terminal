@@ -10,7 +10,7 @@
  */
 {
   "endpoints": {
-    "binance_ws": "wss://stream.binance.com:9443/ws",
+    "chainlink_ws": "wss://ws-live-data.polymarket.com",
     "polymarket_ws": "wss://ws-subscriptions-clob.polymarket.com/ws/market",
     "polymarket_user_ws": "wss://ws-subscriptions-clob.polymarket.com/ws/user",
     "polymarket_gamma": "https://gamma-api.polymarket.com",

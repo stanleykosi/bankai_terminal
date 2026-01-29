@@ -18,7 +18,7 @@ use tokio::sync::broadcast;
 
 use crate::config::Config;
 use crate::engine::risk::RiskState;
-use crate::engine::types::{AlloraMarketUpdate, BinanceMarketUpdate, MarketUpdate};
+use crate::engine::types::{AlloraMarketUpdate, ChainlinkMarketUpdate, MarketUpdate};
 use crate::error::{BankaiError, Result};
 use crate::telemetry::metrics;
 
@@ -74,24 +74,24 @@ impl EngineCore {
 
     async fn handle_update(&self, state: &mut EngineState, update: MarketUpdate) -> Result<()> {
         match update {
-            MarketUpdate::Binance(update) => self.handle_binance_update(state, update).await,
+            MarketUpdate::Chainlink(update) => self.handle_chainlink_update(state, update).await,
             MarketUpdate::Allora(update) => self.handle_allora_update(state, update).await,
         }
     }
 
-    async fn handle_binance_update(
+    async fn handle_chainlink_update(
         &self,
         state: &mut EngineState,
-        update: BinanceMarketUpdate,
+        update: ChainlinkMarketUpdate,
     ) -> Result<()> {
         let config = self.config.load_full();
         self.record_latency(update.event_time_ms)?;
         state
-            .last_binance
+            .last_chainlink
             .insert(update.asset.clone(), update.clone());
 
         if self.risk.is_halted() {
-            tracing::warn!(asset = %update.asset, "risk halt active; skipping binance update");
+            tracing::warn!(asset = %update.asset, "risk halt active; skipping chainlink update");
             return Ok(());
         }
 
@@ -145,14 +145,14 @@ impl EngineCore {
 }
 
 struct EngineState {
-    last_binance: HashMap<String, BinanceMarketUpdate>,
+    last_chainlink: HashMap<String, ChainlinkMarketUpdate>,
     last_allora: HashMap<String, AlloraMarketUpdate>,
 }
 
 impl EngineState {
     fn new() -> Self {
         Self {
-            last_binance: HashMap::new(),
+            last_chainlink: HashMap::new(),
             last_allora: HashMap::new(),
         }
     }
@@ -178,16 +178,9 @@ fn is_five_min_signal(update: &AlloraMarketUpdate) -> bool {
     update.timeframe.trim().eq_ignore_ascii_case("5m")
 }
 
-fn resolve_price(update: &BinanceMarketUpdate) -> Option<f64> {
-    if let Some(value) = update.last_price {
-        if value > 0.0 {
-            return Some(value);
-        }
-    }
-    match (update.best_bid, update.best_ask) {
-        (Some(bid), Some(ask)) if bid > 0.0 && ask > 0.0 => Some((bid + ask) / 2.0),
-        (Some(bid), None) if bid > 0.0 => Some(bid),
-        (None, Some(ask)) if ask > 0.0 => Some(ask),
+fn resolve_price(update: &ChainlinkMarketUpdate) -> Option<f64> {
+    match update.last_price {
+        Some(value) if value > 0.0 => Some(value),
         _ => None,
     }
 }

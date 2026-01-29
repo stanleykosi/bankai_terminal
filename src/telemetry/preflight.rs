@@ -110,7 +110,7 @@ pub async fn run(config: &Config) -> Result<PreflightReport> {
     let gamma_url = build_gamma_url(&config.endpoints.polymarket_gamma)?;
     let relayer_url = build_relayer_url(&config.endpoints.relayer_http)?;
     let polygon_rpc = config.endpoints.polygon_rpc.clone();
-    let binance_ws = config.endpoints.binance_ws.clone();
+    let chainlink_ws = config.endpoints.chainlink_ws.clone();
     let polymarket_ws = config.endpoints.polymarket_ws.clone();
     let polymarket_user_ws = config.endpoints.polymarket_user_ws.clone();
 
@@ -137,8 +137,8 @@ pub async fn run(config: &Config) -> Result<PreflightReport> {
     ));
 
     checks.push(check_websocket_endpoint(
-        "binance ws",
-        binance_ws,
+        "chainlink ws",
+        chainlink_ws,
         true,
         timeout,
     ));

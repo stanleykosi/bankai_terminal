@@ -30,12 +30,12 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::time::Duration;
 
+use crate::accounting::utils::scale_u256;
 use crate::config::Config;
 use crate::error::{BankaiError, Result};
 use crate::execution::signer::Eip712Signer;
 use crate::security::Secrets;
 use crate::storage::redis::RedisManager;
-use crate::accounting::utils::scale_u256;
 
 type HmacSha256 = Hmac<sha2::Sha256>;
 

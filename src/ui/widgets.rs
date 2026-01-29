@@ -80,7 +80,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, status: &StatusBarData) {
     } else {
         "OK".to_string()
     };
-    let binance_label = if status.binance_online {
+    let chainlink_label = if status.chainlink_online {
         "ONLINE"
     } else {
         "OFFLINE"
@@ -116,9 +116,9 @@ fn render_status_bar(frame: &mut Frame, area: Rect, status: &StatusBarData) {
         Span::raw(": "),
         Span::styled(risk_label, risk_style),
         Span::raw("  "),
-        Span::styled("Binance", Style::default().fg(Color::DarkGray)),
+        Span::styled("Chainlink", Style::default().fg(Color::DarkGray)),
         Span::raw(": "),
-        Span::styled(binance_label, oracle_style(status.binance_online)),
+        Span::styled(chainlink_label, oracle_style(status.chainlink_online)),
         Span::raw("  "),
         Span::styled("Allora", Style::default().fg(Color::DarkGray)),
         Span::raw(": "),
@@ -182,8 +182,8 @@ fn render_system_panel(
         health.latency_ms, health.clock_drift_ms, health.consecutive_losses
     )));
     lines.push(Line::from(format!(
-        "Binance: {} | Allora: {} | Poly: {}",
-        oracle_label(status.binance_online),
+        "Chainlink: {} | Allora: {} | Poly: {}",
+        oracle_label(status.chainlink_online),
         oracle_label(status.allora_online),
         oracle_label(status.polymarket_online),
     )));
@@ -210,7 +210,7 @@ fn render_system_panel(
         "Poly Assets: {assets} | Refresh: {refresh}"
     )));
 
-    if health.binance_window_anchor {
+    if health.chainlink_window_anchor {
         lines.push(Line::from(Span::styled(
             "15m anchor: locked",
             Style::default().fg(Color::Green),

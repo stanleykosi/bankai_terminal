@@ -38,10 +38,10 @@ use std::str::FromStr;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 
+use crate::accounting::utils::scale_u256;
 use crate::error::{BankaiError, Result};
 use crate::security::Secrets;
 use crate::storage::redis::RedisManager;
-use crate::accounting::utils::scale_u256;
 
 const DEFAULT_ABI_PATH: &str = "abi/ConditionalTokens.json";
 const DEFAULT_PARENT_COLLECTION_ID: &str =

@@ -23,7 +23,7 @@ use crate::config::{Config, FeeConfig};
 use crate::engine::analysis::{analyze_opportunity, AnalysisInput, TradeDecision};
 use crate::engine::risk::RiskState;
 use crate::engine::types::{
-    AlloraMarketUpdate, BinanceMarketUpdate, MarketUpdate, MarketWindow, TradeIntent, TradeMode,
+    AlloraMarketUpdate, ChainlinkMarketUpdate, MarketUpdate, MarketWindow, TradeIntent, TradeMode,
 };
 use crate::error::{BankaiError, Result};
 use crate::storage::orderbook::{BookSide, OrderBookStore};
@@ -108,9 +108,9 @@ impl TradingEngine {
 
     async fn handle_update(&self, state: &mut TraderState, update: MarketUpdate) -> Result<()> {
         match update {
-            MarketUpdate::Binance(update) => {
+            MarketUpdate::Chainlink(update) => {
                 state
-                    .last_binance
+                    .last_chainlink
                     .insert(update.asset.clone(), update.clone());
                 self.evaluate_asset(state, &update.asset).await?;
             }
@@ -140,13 +140,13 @@ impl TradingEngine {
             }
         }
 
-        let Some(binance) = state.last_binance.get(asset) else {
+        let Some(chainlink) = state.last_chainlink.get(asset) else {
             return Ok(());
         };
 
-        let _current_price = resolve_binance_price(binance)
-            .ok_or_else(|| BankaiError::InvalidArgument("binance price missing".to_string()))?;
-        let volatility = binance
+        let _current_price = resolve_chainlink_price(chainlink)
+            .ok_or_else(|| BankaiError::InvalidArgument("chainlink price missing".to_string()))?;
+        let volatility = chainlink
             .volatility_1m
             .unwrap_or(config.execution.min_volatility)
             .max(config.execution.min_volatility);
@@ -601,7 +601,7 @@ impl TradingEngine {
 }
 
 struct TraderState {
-    last_binance: HashMap<String, BinanceMarketUpdate>,
+    last_chainlink: HashMap<String, ChainlinkMarketUpdate>,
     last_allora: HashMap<String, AlloraMarketUpdate>,
     last_intent_ms: HashMap<String, u64>,
     last_signal_miss_ms: HashMap<String, u64>,
@@ -613,7 +613,7 @@ struct TraderState {
 impl TraderState {
     fn new() -> Self {
         Self {
-            last_binance: HashMap::new(),
+            last_chainlink: HashMap::new(),
             last_allora: HashMap::new(),
             last_intent_ms: HashMap::new(),
             last_signal_miss_ms: HashMap::new(),
@@ -674,16 +674,9 @@ fn select_aligned_5m_signal(
     })
 }
 
-fn resolve_binance_price(update: &BinanceMarketUpdate) -> Option<f64> {
-    if let Some(price) = update.last_price {
-        if price > 0.0 {
-            return Some(price);
-        }
-    }
-    match (update.best_bid, update.best_ask) {
-        (Some(bid), Some(ask)) if bid > 0.0 && ask > 0.0 => Some((bid + ask) / 2.0),
-        (Some(bid), None) if bid > 0.0 => Some(bid),
-        (None, Some(ask)) if ask > 0.0 => Some(ask),
+fn resolve_chainlink_price(update: &ChainlinkMarketUpdate) -> Option<f64> {
+    match update.last_price {
+        Some(price) if price > 0.0 => Some(price),
         _ => None,
     }
 }

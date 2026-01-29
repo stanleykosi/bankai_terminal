@@ -41,7 +41,7 @@ pub struct Config {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct EndpointConfig {
-    pub binance_ws: String,
+    pub chainlink_ws: String,
     pub polymarket_ws: String,
     #[serde(default)]
     pub polymarket_user_ws: Option<String>,
