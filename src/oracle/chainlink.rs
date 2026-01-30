@@ -520,5 +520,33 @@ fn parse_event(text: &str) -> Result<Option<ChainlinkEvent>> {
         }
     }
 
+    if let Some(payload) = raw.get("payload") {
+        if let Some(symbol) = payload.get("symbol").and_then(|value| value.as_str()) {
+            if symbol.contains('/') {
+                let price = match payload.get("value") {
+                    Some(value) if value.is_number() => value.as_f64().unwrap_or(0.0),
+                    Some(value) if value.is_string() => value
+                        .as_str()
+                        .unwrap_or_default()
+                        .parse::<f64>()
+                        .unwrap_or(0.0),
+                    _ => 0.0,
+                };
+                if price > 0.0 {
+                    let event_time_ms = payload
+                        .get("timestamp")
+                        .or_else(|| raw.get("timestamp"))
+                        .and_then(|value| value.as_u64())
+                        .unwrap_or(0);
+                    return Ok(Some(ChainlinkEvent {
+                        symbol: symbol.to_string(),
+                        price,
+                        event_time_ms,
+                    }));
+                }
+            }
+        }
+    }
+
     Ok(None)
 }

@@ -978,7 +978,7 @@ fn allora_online_window(config: &Config) -> Duration {
 }
 
 fn chainlink_online_window(_config: &Config) -> Duration {
-    Duration::from_secs(60)
+    Duration::from_secs(10)
 }
 
 fn ui_loop(receiver: mpsc::Receiver<UiCommand>, config: TuiConfig) -> UiResult<()> {
