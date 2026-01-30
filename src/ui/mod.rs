@@ -48,7 +48,6 @@ const DEFAULT_ORDER_LOG_LIMIT: usize = 6;
 const POLYMARKET_STALE_MS: u64 = 120_000;
 const ORACLE_ONLINE_MULTIPLIER: u64 = 3;
 const SIGNAL_HORIZON_MS: u64 = 5 * 60 * 1_000;
-const SIGNAL_TARGET_TOLERANCE_MS: u64 = 40_000;
 const SQRT_5: f64 = 2.236_067_977_5;
 const PAPER_STATS_WINS_KEY: &str = "paper:stats:wins";
 const PAPER_STATS_LOSSES_KEY: &str = "paper:stats:losses";
@@ -631,7 +630,14 @@ async fn estimate_vwap_price(
     let Some(implied_mid) = implied_mid else {
         return Ok(None);
     };
-    let alignment = alignment_factor(snapshot, now_ms);
+    let alignment = alignment_factor(
+        snapshot,
+        now_ms,
+        config
+            .execution
+            .signal_alignment_max_secs
+            .saturating_mul(1000),
+    );
     let volatility_1m = snapshot
         .volatility_1m
         .unwrap_or(config.execution.min_volatility)
@@ -822,7 +828,14 @@ fn build_market_row(
         .implied_down_vwap
         .or_else(|| implied_up_vwap.map(|v| (1.0 - v).max(0.0)));
 
-    let alignment = alignment_factor(snapshot, now_ms);
+    let alignment = alignment_factor(
+        snapshot,
+        now_ms,
+        config
+            .execution
+            .signal_alignment_max_secs
+            .saturating_mul(1000),
+    );
     let volatility_1m = snapshot
         .volatility_1m
         .unwrap_or(config.execution.min_volatility)
@@ -1109,7 +1122,7 @@ fn now_ms() -> Option<u64> {
     Some(now.as_millis() as u64)
 }
 
-fn alignment_factor(snapshot: &MarketSnapshot, now_ms: u64) -> Option<f64> {
+fn alignment_factor(snapshot: &MarketSnapshot, now_ms: u64, max_alignment_ms: u64) -> Option<f64> {
     let signal_ts = snapshot.signal_timestamp_ms?;
     let window = snapshot.window?;
     if signal_ts < window.start_time_ms || signal_ts > window.end_time_ms {
@@ -1120,10 +1133,11 @@ fn alignment_factor(snapshot: &MarketSnapshot, now_ms: u64) -> Option<f64> {
     }
     let target_ts = window.end_time_ms.saturating_sub(SIGNAL_HORIZON_MS);
     let diff = signal_ts.abs_diff(target_ts);
-    if diff > SIGNAL_TARGET_TOLERANCE_MS {
+    if max_alignment_ms > 0 && diff > max_alignment_ms {
         return None;
     }
-    let alignment = 1.0 - (diff as f64 / SIGNAL_HORIZON_MS as f64);
+    let denom = max_alignment_ms.max(1) as f64;
+    let alignment = 1.0 - (diff as f64 / denom);
     Some(alignment.clamp(0.0, 1.0))
 }
 

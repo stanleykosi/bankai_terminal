@@ -32,7 +32,6 @@ use crate::storage::redis::RedisManager;
 const DEFAULT_TICK_INTERVAL: Duration = Duration::from_secs(5);
 const ACTIVITY_LOG_LIMIT: usize = 50;
 const SIGNAL_HORIZON_MS: u64 = 5 * 60 * 1_000;
-const SIGNAL_TARGET_TOLERANCE_MS: u64 = 40_000;
 const SQRT_5: f64 = 2.236_067_977_5;
 const ORDERBOOK_STALE_MS: u64 = 5_000;
 
@@ -161,7 +160,13 @@ impl TradingEngine {
             end_time_ms: asset_window.end_time_ms,
         };
 
-        let Some(aligned) = select_aligned_5m_signal(&state.last_allora, asset, window, now) else {
+        let max_align_ms = config
+            .execution
+            .signal_alignment_max_secs
+            .saturating_mul(1000);
+        let Some(aligned) =
+            select_aligned_5m_signal(&state.last_allora, asset, window, now, max_align_ms)
+        else {
             let last = state.last_signal_miss_ms.get(asset).copied().unwrap_or(0);
             if now.saturating_sub(last) > 30_000 {
                 self.log_alert(asset, "missing aligned 10m signal; skipping window")
@@ -636,6 +641,7 @@ fn select_aligned_5m_signal(
     asset: &str,
     window: MarketWindow,
     now_ms: u64,
+    max_alignment_ms: u64,
 ) -> Option<AlignedSignal> {
     let target_ts = window.end_time_ms.saturating_sub(SIGNAL_HORIZON_MS);
     let mut best: Option<(AlloraMarketUpdate, u64)> = None;
@@ -657,7 +663,7 @@ fn select_aligned_5m_signal(
         }
 
         let diff = update.signal_timestamp_ms.abs_diff(target_ts);
-        if diff > SIGNAL_TARGET_TOLERANCE_MS {
+        if max_alignment_ms > 0 && diff > max_alignment_ms {
             continue;
         }
 
@@ -668,7 +674,8 @@ fn select_aligned_5m_signal(
     }
 
     best.map(|(update, diff)| {
-        let alignment = 1.0 - (diff as f64 / SIGNAL_HORIZON_MS as f64);
+        let denom = max_alignment_ms.max(1) as f64;
+        let alignment = 1.0 - (diff as f64 / denom);
         AlignedSignal {
             update,
             alignment: alignment.clamp(0.0, 1.0),
