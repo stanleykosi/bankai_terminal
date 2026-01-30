@@ -424,23 +424,27 @@ fn compute_stddev(samples: &VecDeque<(u64, f64)>) -> Option<f64> {
 }
 
 fn subscribe_payload(symbols: &[String]) -> Result<String> {
-    if symbols.is_empty() {
-        return Err(BankaiError::InvalidArgument(
-            "chainlink oracle requires at least one symbol".to_string(),
-        ));
-    }
-    let subscriptions: Vec<Value> = symbols
-        .iter()
-        .map(|symbol| {
-            let normalized = symbol.trim().to_ascii_lowercase();
-            let filters = format!(r#"{{"symbol":"{normalized}"}}"#);
-            serde_json::json!({
-                "topic": TOPIC,
-                "type": "*",
-                "filters": filters
+    let mut subscriptions: Vec<Value> = Vec::new();
+    subscriptions.push(serde_json::json!({
+        "topic": TOPIC,
+        "type": "*",
+        "filters": ""
+    }));
+    if !symbols.is_empty() {
+        let filtered: Vec<Value> = symbols
+            .iter()
+            .map(|symbol| {
+                let normalized = symbol.trim().to_ascii_lowercase();
+                let filters = format!(r#"{{"symbol":"{normalized}"}}"#);
+                serde_json::json!({
+                    "topic": TOPIC,
+                    "type": "*",
+                    "filters": filters
+                })
             })
-        })
-        .collect();
+            .collect();
+        subscriptions.extend(filtered);
+    }
     let payload = serde_json::json!({
         "action": "subscribe",
         "subscriptions": subscriptions
