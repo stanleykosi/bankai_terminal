@@ -67,6 +67,7 @@ impl ChainlinkOracle {
 
     async fn run(self, sender: broadcast::Sender<MarketUpdate>) -> Result<()> {
         let mut states = HashMap::new();
+        let mut last_log_ms: HashMap<String, u64> = HashMap::new();
         let mut asset_windows: HashMap<String, AssetWindow> = HashMap::new();
         let mut window_refresh = tokio::time::interval(self.config.window_refresh_interval);
         let mut ping_interval = tokio::time::interval(DEFAULT_PING_INTERVAL);
@@ -153,6 +154,30 @@ impl ChainlinkOracle {
                                         }
                                     }
                                     if let Some(update) = state.apply_event(&asset_key, event)? {
+                                        if let Some(redis) = self.config.redis.as_ref() {
+                                            let now = now_ms().unwrap_or(0);
+                                            let _ = redis
+                                                .set_chainlink_price(
+                                                    &asset_key,
+                                                    update.last_price.unwrap_or(0.0),
+                                                    update.event_time_ms.max(now),
+                                                )
+                                                .await;
+                                            let last = last_log_ms.get(&asset_key).copied().unwrap_or(0);
+                                            if now.saturating_sub(last) > 10_000 {
+                                                let _ = redis
+                                                    .push_activity_log(
+                                                        &format!(
+                                                            "[CHAINLINK] {} price {:.4}",
+                                                            asset_key,
+                                                            update.last_price.unwrap_or(0.0)
+                                                        ),
+                                                        200,
+                                                    )
+                                                    .await;
+                                                last_log_ms.insert(asset_key.clone(), now);
+                                            }
+                                        }
                                         let _ = sender.send(MarketUpdate::Chainlink(update));
                                     }
                                 }

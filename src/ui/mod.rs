@@ -590,6 +590,12 @@ async fn refresh_market_snapshots(
             )
             .await?;
         }
+        if let Ok(Some(price)) = redis.get_chainlink_price(&snapshot.asset).await {
+            snapshot.price = Some(price);
+            if let Ok(updated_ms) = redis.get_chainlink_updated_ms().await {
+                snapshot.last_chainlink_ms = updated_ms;
+            }
+        }
     }
     Ok(())
 }

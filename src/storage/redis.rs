@@ -41,6 +41,7 @@ const ASSET_WINDOW_CACHE_PREFIX: &str = "polymarket:windows:";
 const FEE_RATE_PREFIX: &str = "polymarket:fee_rate:";
 const ASSET_START_PRICE_PREFIX: &str = "polymarket:start_price:";
 const ASSET_END_PRICE_PREFIX: &str = "polymarket:end_price:";
+const CHAINLINK_STATUS_KEY: &str = "oracle:chainlink:status";
 const ORDERBOOK_TS_PREFIX: &str = "polymarket:book_ts:";
 const LAST_TRADE_PREFIX: &str = "polymarket:last_trade:";
 const TOKEN_MARKET_PREFIX: &str = "polymarket:token_market:";
@@ -528,6 +529,29 @@ impl RedisManager {
             (Some(end), Some(price)) if end > 0 && price > 0.0 => Ok(Some((end as u64, price))),
             _ => Ok(None),
         }
+    }
+
+    pub async fn set_chainlink_price(
+        &self,
+        asset: &str,
+        price: f64,
+        updated_at_ms: u64,
+    ) -> Result<()> {
+        let mut conn = self.connection.clone();
+        conn.hset::<_, _, _, ()>(CHAINLINK_STATUS_KEY, asset, price)
+            .await?;
+        conn.hset::<_, _, _, ()>(CHAINLINK_STATUS_KEY, "updatedAtMs", updated_at_ms as i64)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn get_chainlink_price(&self, asset: &str) -> Result<Option<f64>> {
+        self.hget_float(CHAINLINK_STATUS_KEY, asset).await
+    }
+
+    pub async fn get_chainlink_updated_ms(&self) -> Result<Option<u64>> {
+        let value = self.hget_i64(CHAINLINK_STATUS_KEY, "updatedAtMs").await?;
+        Ok(value.map(|ts| ts as u64))
     }
 
     pub async fn set_polymarket_asset_ids(&self, asset_ids: &[String]) -> Result<()> {
