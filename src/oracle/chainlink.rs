@@ -24,6 +24,7 @@ use crate::storage::redis::{AssetWindow, RedisManager};
 
 const TOPIC: &str = "crypto_prices_chainlink";
 const DEFAULT_PING_INTERVAL: Duration = Duration::from_secs(5);
+const ACTIVITY_LOG_LIMIT: usize = 200;
 
 fn compute_jitter(max_ms: u64) -> Result<Duration> {
     if max_ms == 0 {
@@ -80,11 +81,27 @@ impl ChainlinkOracle {
             let ws_stream = match tokio_tungstenite::connect_async(&endpoint).await {
                 Ok((stream, _)) => {
                     tracing::info!(endpoint = %endpoint, "chainlink ws connected");
+                    if let Some(redis) = self.config.redis.as_ref() {
+                        let _ = redis
+                            .push_activity_log(
+                                &format!("[CHAINLINK] connected {}", endpoint),
+                                ACTIVITY_LOG_LIMIT,
+                            )
+                            .await;
+                    }
                     backoff.reset();
                     stream
                 }
                 Err(error) => {
                     tracing::warn!(?error, endpoint = %endpoint, "chainlink ws connect failed");
+                    if let Some(redis) = self.config.redis.as_ref() {
+                        let _ = redis
+                            .push_activity_log(
+                                &format!("[CHAINLINK] connect failed {:?} {}", error, endpoint),
+                                ACTIVITY_LOG_LIMIT,
+                            )
+                            .await;
+                    }
                     let delay = backoff.next_delay()?;
                     tokio::time::sleep(delay).await;
                     continue;
@@ -95,9 +112,22 @@ impl ChainlinkOracle {
             let payload = subscribe_payload(&self.config.symbols)?;
             if let Err(error) = writer.send(Message::Text(payload)).await {
                 tracing::warn!(?error, endpoint = %endpoint, "chainlink ws subscribe failed");
+                if let Some(redis) = self.config.redis.as_ref() {
+                    let _ = redis
+                        .push_activity_log(
+                            &format!("[CHAINLINK] subscribe failed {:?}", error),
+                            ACTIVITY_LOG_LIMIT,
+                        )
+                        .await;
+                }
                 let delay = backoff.next_delay()?;
                 tokio::time::sleep(delay).await;
                 continue;
+            }
+            if let Some(redis) = self.config.redis.as_ref() {
+                let _ = redis
+                    .push_activity_log("[CHAINLINK] subscribed", ACTIVITY_LOG_LIMIT)
+                    .await;
             }
 
             loop {
@@ -121,7 +151,24 @@ impl ChainlinkOracle {
                     message = reader.next() => {
                         match message {
                             Some(Ok(Message::Text(text))) => {
-                                if let Some(mut event) = parse_event(&text)? {
+                                let event = match parse_event(&text) {
+                                    Ok(value) => value,
+                                    Err(error) => {
+                                        if let Some(redis) = self.config.redis.as_ref() {
+                                            let _ = redis
+                                                .push_activity_log(
+                                                    &format!(
+                                                        "[CHAINLINK] parse error {:?}",
+                                                        error
+                                                    ),
+                                                    ACTIVITY_LOG_LIMIT,
+                                                )
+                                                .await;
+                                        }
+                                        continue;
+                                    }
+                                };
+                                if let Some(mut event) = event {
                                     if event.event_time_ms == 0 {
                                         event.event_time_ms = now_ms().unwrap_or(0);
                                     }
@@ -190,15 +237,39 @@ impl ChainlinkOracle {
                             }
                             Some(Ok(Message::Close(frame))) => {
                                 tracing::warn!(?frame, endpoint = %endpoint, "chainlink ws closed");
+                                if let Some(redis) = self.config.redis.as_ref() {
+                                    let _ = redis
+                                        .push_activity_log(
+                                            &format!("[CHAINLINK] closed {:?}", frame),
+                                            ACTIVITY_LOG_LIMIT,
+                                        )
+                                        .await;
+                                }
                                 break;
                             }
                             Some(Ok(_)) => {}
                             Some(Err(error)) => {
                                 tracing::warn!(?error, endpoint = %endpoint, "chainlink ws error");
+                                if let Some(redis) = self.config.redis.as_ref() {
+                                    let _ = redis
+                                        .push_activity_log(
+                                            &format!("[CHAINLINK] ws error {:?}", error),
+                                            ACTIVITY_LOG_LIMIT,
+                                        )
+                                        .await;
+                                }
                                 break;
                             }
                             None => {
                                 tracing::warn!(endpoint = %endpoint, "chainlink ws stream ended");
+                                if let Some(redis) = self.config.redis.as_ref() {
+                                    let _ = redis
+                                        .push_activity_log(
+                                            "[CHAINLINK] stream ended",
+                                            ACTIVITY_LOG_LIMIT,
+                                        )
+                                        .await;
+                                }
                                 break;
                             }
                         }
