@@ -23,6 +23,7 @@ use crate::error::{BankaiError, Result};
 use crate::storage::redis::{AssetWindow, RedisManager};
 
 const TOPIC: &str = "crypto_prices_chainlink";
+const DEFAULT_PING_INTERVAL: Duration = Duration::from_secs(5);
 
 fn compute_jitter(max_ms: u64) -> Result<Duration> {
     if max_ms == 0 {
@@ -68,6 +69,7 @@ impl ChainlinkOracle {
         let mut states = HashMap::new();
         let mut asset_windows: HashMap<String, AssetWindow> = HashMap::new();
         let mut window_refresh = tokio::time::interval(self.config.window_refresh_interval);
+        let mut ping_interval = tokio::time::interval(DEFAULT_PING_INTERVAL);
         let mut backoff = ReconnectBackoff::new();
 
         loop {
@@ -107,6 +109,12 @@ impl ChainlinkOracle {
                                     asset_windows.insert(asset_key, window);
                                 }
                             }
+                        }
+                    }
+                    _ = ping_interval.tick() => {
+                        if let Err(error) = writer.send(Message::Ping(Vec::new())).await {
+                            tracing::warn!(?error, "chainlink ws ping failed");
+                            break;
                         }
                     }
                     message = reader.next() => {
@@ -428,7 +436,7 @@ fn subscribe_payload(symbols: &[String]) -> Result<String> {
             let filters = format!(r#"{{"symbol":"{normalized}"}}"#);
             serde_json::json!({
                 "topic": TOPIC,
-                "type": "update",
+                "type": "*",
                 "filters": filters
             })
         })
@@ -446,41 +454,71 @@ fn parse_event(text: &str) -> Result<Option<ChainlinkEvent>> {
         .get("topic")
         .and_then(|value| value.as_str())
         .unwrap_or_default();
-    if topic != TOPIC {
-        return Ok(None);
-    }
     let event_type = raw.get("type").and_then(|value| value.as_str());
-    if !matches!(event_type, Some("update") | Some("*") | None) {
-        return Ok(None);
-    }
-    let payload = raw
-        .get("payload")
-        .ok_or_else(|| BankaiError::InvalidArgument("chainlink payload missing".to_string()))?;
-    let symbol = payload
-        .get("symbol")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| BankaiError::InvalidArgument("chainlink symbol missing".to_string()))?;
-    let price = match payload.get("value") {
-        Some(value) if value.is_number() => value.as_f64().unwrap_or(0.0),
-        Some(value) if value.is_string() => value
-            .as_str()
-            .unwrap_or_default()
-            .parse::<f64>()
-            .unwrap_or(0.0),
-        _ => 0.0,
-    };
-    if price <= 0.0 {
-        return Ok(None);
-    }
-    let event_time_ms = payload
-        .get("timestamp")
-        .or_else(|| raw.get("timestamp"))
-        .and_then(|value| value.as_u64())
-        .unwrap_or(0);
 
-    Ok(Some(ChainlinkEvent {
-        symbol: symbol.to_string(),
-        price,
-        event_time_ms,
-    }))
+    if topic == TOPIC && matches!(event_type, Some("update") | Some("*") | None) {
+        let payload = raw
+            .get("payload")
+            .ok_or_else(|| BankaiError::InvalidArgument("chainlink payload missing".to_string()))?;
+        let symbol = payload
+            .get("symbol")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| BankaiError::InvalidArgument("chainlink symbol missing".to_string()))?;
+        let price = match payload.get("value") {
+            Some(value) if value.is_number() => value.as_f64().unwrap_or(0.0),
+            Some(value) if value.is_string() => value
+                .as_str()
+                .unwrap_or_default()
+                .parse::<f64>()
+                .unwrap_or(0.0),
+            _ => 0.0,
+        };
+        if price <= 0.0 {
+            return Ok(None);
+        }
+        let event_time_ms = payload
+            .get("timestamp")
+            .or_else(|| raw.get("timestamp"))
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0);
+        return Ok(Some(ChainlinkEvent {
+            symbol: symbol.to_string(),
+            price,
+            event_time_ms,
+        }));
+    }
+
+    if topic == "crypto_prices" && matches!(event_type, Some("subscribe") | Some("update")) {
+        let payload = match raw.get("payload") {
+            Some(value) => value,
+            None => return Ok(None),
+        };
+        let symbol = payload.get("symbol").and_then(|value| value.as_str());
+        if let Some(symbol) = symbol {
+            if !symbol.contains('/') {
+                return Ok(None);
+            }
+            if let Some(data) = payload.get("data").and_then(|value| value.as_array()) {
+                if let Some(last) = data.last() {
+                    let price = last
+                        .get("value")
+                        .and_then(|value| value.as_f64())
+                        .unwrap_or(0.0);
+                    if price > 0.0 {
+                        let event_time_ms = last
+                            .get("timestamp")
+                            .and_then(|value| value.as_u64())
+                            .unwrap_or(0);
+                        return Ok(Some(ChainlinkEvent {
+                            symbol: symbol.to_string(),
+                            price,
+                            event_time_ms,
+                        }));
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(None)
 }
