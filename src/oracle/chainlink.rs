@@ -13,7 +13,7 @@
  */
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
 use tokio_tungstenite::tungstenite::Message;
@@ -69,6 +69,7 @@ impl ChainlinkOracle {
     async fn run(self, sender: broadcast::Sender<MarketUpdate>) -> Result<()> {
         let mut states = HashMap::new();
         let mut last_log_ms: HashMap<String, u64> = HashMap::new();
+        let allowed_assets = allowed_assets(&self.config.symbols);
         let mut asset_windows: HashMap<String, AssetWindow> = HashMap::new();
         let mut window_refresh = tokio::time::interval(self.config.window_refresh_interval);
         let mut ping_interval = tokio::time::interval(DEFAULT_PING_INTERVAL);
@@ -173,6 +174,9 @@ impl ChainlinkOracle {
                                         event.event_time_ms = now_ms().unwrap_or(0);
                                     }
                                     let asset_key = canonical_asset(&event.symbol);
+                                    if !allowed_assets.contains(&asset_key) {
+                                        continue;
+                                    }
                                     let state = states
                                         .entry(asset_key.clone())
                                         .or_insert_with(|| AssetState::new(self.config.candle_interval));
@@ -212,16 +216,6 @@ impl ChainlinkOracle {
                                                 .await;
                                             let last = last_log_ms.get(&asset_key).copied().unwrap_or(0);
                                             if now.saturating_sub(last) > 10_000 {
-                                                let _ = redis
-                                                    .push_activity_log(
-                                                        &format!(
-                                                            "[CHAINLINK] {} price {:.4}",
-                                                            asset_key,
-                                                            update.last_price.unwrap_or(0.0)
-                                                        ),
-                                                        200,
-                                                    )
-                                                    .await;
                                                 last_log_ms.insert(asset_key.clone(), now);
                                             }
                                         }
@@ -499,6 +493,22 @@ fn canonical_asset(raw: &str) -> String {
         .or_else(|| upper.strip_suffix("USD"))
         .map(|value| value.to_string())
         .unwrap_or(upper)
+}
+
+fn allowed_assets(symbols: &[String]) -> HashSet<String> {
+    let mut allowed = HashSet::new();
+    for symbol in symbols {
+        let asset = canonical_asset(symbol);
+        if !asset.is_empty() {
+            allowed.insert(asset);
+        }
+    }
+    if allowed.is_empty() {
+        allowed.insert("BTC".to_string());
+        allowed.insert("ETH".to_string());
+        allowed.insert("SOL".to_string());
+    }
+    allowed
 }
 
 fn compute_stddev(samples: &VecDeque<(u64, f64)>) -> Option<f64> {
