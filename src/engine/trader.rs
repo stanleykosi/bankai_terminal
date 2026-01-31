@@ -31,7 +31,7 @@ use crate::storage::redis::RedisManager;
 
 const DEFAULT_TICK_INTERVAL: Duration = Duration::from_secs(5);
 const ACTIVITY_LOG_LIMIT: usize = 50;
-const SIGNAL_HORIZON_MS: u64 = 5 * 60 * 1_000;
+const DEFAULT_SIGNAL_HORIZON_MS: u64 = 5 * 60 * 1_000;
 const SQRT_5: f64 = 2.236_067_977_5;
 const ORDERBOOK_STALE_MS: u64 = 5_000;
 
@@ -123,53 +123,93 @@ impl TradingEngine {
     }
 
     async fn evaluate_asset(&self, state: &mut TraderState, asset: &str) -> Result<()> {
-        if self.risk.is_halted() {
-            return Ok(());
-        }
         let config = self.config.load_full();
-        if !config.execution.enable_trading && !config.execution.no_money_mode {
+        let now = now_ms()?;
+        if self.risk.is_halted() {
+            self.log_blocker(state, asset, "risk_halt", "risk halted; skipping", now)
+                .await;
             return Ok(());
         }
-
-        let now = now_ms()?;
+        if !config.execution.enable_trading && !config.execution.no_money_mode {
+            self.log_blocker(
+                state,
+                asset,
+                "trading_disabled",
+                "trading disabled; skipping",
+                now,
+            )
+            .await;
+            return Ok(());
+        }
         if let Some(last_intent) = state.last_intent_ms.get(asset) {
             let cooldown = config.execution.order_cooldown_secs * 1000;
             if now.saturating_sub(*last_intent) < cooldown {
+                self.log_blocker(state, asset, "cooldown", "cooldown active; skipping", now)
+                    .await;
                 return Ok(());
             }
         }
 
         let Some(chainlink) = state.last_chainlink.get(asset) else {
+            self.log_blocker(
+                state,
+                asset,
+                "chainlink_missing",
+                "chainlink price missing; skipping",
+                now,
+            )
+            .await;
             return Ok(());
         };
 
-        let _current_price = resolve_chainlink_price(chainlink)
-            .ok_or_else(|| BankaiError::InvalidArgument("chainlink price missing".to_string()))?;
+        let _current_price = match resolve_chainlink_price(chainlink) {
+            Some(value) => value,
+            None => {
+                self.log_blocker(
+                    state,
+                    asset,
+                    "chainlink_price_invalid",
+                    "chainlink price invalid; skipping",
+                    now,
+                )
+                .await;
+                return Ok(());
+            }
+        };
         let volatility = chainlink
             .volatility_1m
             .unwrap_or(config.execution.min_volatility)
             .max(config.execution.min_volatility);
 
-        let asset_window = self
-            .redis
-            .get_asset_window(asset)
-            .await?
-            .ok_or_else(|| BankaiError::InvalidArgument("asset window missing".to_string()))?;
+        let Some(asset_window) = self.redis.get_asset_window(asset).await? else {
+            self.log_blocker(
+                state,
+                asset,
+                "window_missing",
+                "asset window missing; skipping",
+                now,
+            )
+            .await;
+            return Ok(());
+        };
         let window = MarketWindow {
             start_time_ms: asset_window.start_time_ms,
             end_time_ms: asset_window.end_time_ms,
         };
 
-        let max_align_ms = config
-            .execution
-            .signal_alignment_max_secs
-            .saturating_mul(1000);
-        let Some(aligned) =
-            select_aligned_5m_signal(&state.last_allora, asset, window, now, max_align_ms)
-        else {
+        let horizon_ms = alignment_horizon_ms(&config, asset);
+        let max_align_ms = horizon_ms;
+        let Some(aligned) = select_aligned_5m_signal(
+            &state.last_allora,
+            asset,
+            window,
+            now,
+            horizon_ms,
+            max_align_ms,
+        ) else {
             let last = state.last_signal_miss_ms.get(asset).copied().unwrap_or(0);
             if now.saturating_sub(last) > 30_000 {
-                self.log_alert(asset, "missing aligned 10m signal; skipping window")
+                self.log_alert(asset, "no 5m signal found in window; skipping")
                     .await;
                 state.last_signal_miss_ms.insert(asset.to_string(), now);
             }
@@ -177,7 +217,23 @@ impl TradingEngine {
         };
         let allora = aligned.update;
         let alignment = aligned.alignment;
-        if now.saturating_sub(allora.signal_timestamp_ms) > SIGNAL_HORIZON_MS {
+        if aligned.carried_forward {
+            self.log_blocker(
+                state,
+                asset,
+                "signal_carry_forward",
+                "carried forward closest 5m signal from before window",
+                now,
+            )
+            .await;
+        }
+        if now.saturating_sub(allora.signal_timestamp_ms) > horizon_ms {
+            let last = state.last_signal_stale_ms.get(asset).copied().unwrap_or(0);
+            if now.saturating_sub(last) > 30_000 {
+                self.log_alert(asset, "5m signal stale; skipping window")
+                    .await;
+                state.last_signal_stale_ms.insert(asset.to_string(), now);
+            }
             return Ok(());
         }
 
@@ -291,8 +347,17 @@ impl TradingEngine {
                 implied_down = implied_down.or(Some(down));
             }
         }
-        let implied_up = implied_up
-            .ok_or_else(|| BankaiError::InvalidArgument("up book mid missing".to_string()))?;
+        let Some(implied_up) = implied_up else {
+            self.log_blocker(
+                state,
+                asset,
+                "implied_missing",
+                "implied price missing; skipping",
+                now,
+            )
+            .await;
+            return Ok(());
+        };
         let implied_down = implied_down.unwrap_or_else(|| (1.0 - implied_up).max(0.0));
 
         let true_up = compute_true_probability_5m(
@@ -467,6 +532,20 @@ impl TradingEngine {
             self.log_intent(asset, &intent).await;
             let _ = self.intent_tx.send(intent).await;
             state.last_intent_ms.insert(asset.to_string(), now);
+        } else {
+            let last = state
+                .last_no_intent_alert_ms
+                .get(asset)
+                .copied()
+                .unwrap_or(0);
+            if now.saturating_sub(last) > 30_000 {
+                self.log_alert(
+                    asset,
+                    "no trade intent (edge below threshold or inputs invalid)",
+                )
+                .await;
+                state.last_no_intent_alert_ms.insert(asset.to_string(), now);
+            }
         }
 
         Ok(())
@@ -501,6 +580,28 @@ impl TradingEngine {
 }
 
 impl TradingEngine {
+    async fn log_blocker(
+        &self,
+        state: &mut TraderState,
+        asset: &str,
+        key: &str,
+        message: &str,
+        now_ms: u64,
+    ) {
+        let throttle_ms = 30_000;
+        let cache_key = format!("{asset}:{key}");
+        let last = state
+            .last_blocker_alert_ms
+            .get(&cache_key)
+            .copied()
+            .unwrap_or(0);
+        if now_ms.saturating_sub(last) < throttle_ms {
+            return;
+        }
+        self.log_alert(asset, message).await;
+        state.last_blocker_alert_ms.insert(cache_key, now_ms);
+    }
+
     async fn log_alert(&self, asset: &str, message: &str) {
         let prefix = log_prefix();
         let entry = format!("{prefix} [ALERT] {asset} {message}");
@@ -612,9 +713,12 @@ struct TraderState {
     last_allora: HashMap<String, AlloraMarketUpdate>,
     last_intent_ms: HashMap<String, u64>,
     last_signal_miss_ms: HashMap<String, u64>,
+    last_signal_stale_ms: HashMap<String, u64>,
     last_fee_alert_ms: HashMap<String, u64>,
     last_start_price_alert_ms: HashMap<String, u64>,
     last_min_order_alert_ms: HashMap<String, u64>,
+    last_no_intent_alert_ms: HashMap<String, u64>,
+    last_blocker_alert_ms: HashMap<String, u64>,
 }
 
 impl TraderState {
@@ -624,9 +728,12 @@ impl TraderState {
             last_allora: HashMap::new(),
             last_intent_ms: HashMap::new(),
             last_signal_miss_ms: HashMap::new(),
+            last_signal_stale_ms: HashMap::new(),
             last_fee_alert_ms: HashMap::new(),
             last_start_price_alert_ms: HashMap::new(),
             last_min_order_alert_ms: HashMap::new(),
+            last_no_intent_alert_ms: HashMap::new(),
+            last_blocker_alert_ms: HashMap::new(),
         }
     }
 }
@@ -634,6 +741,7 @@ impl TraderState {
 struct AlignedSignal {
     update: AlloraMarketUpdate,
     alignment: f64,
+    carried_forward: bool,
 }
 
 fn select_aligned_5m_signal(
@@ -641,10 +749,12 @@ fn select_aligned_5m_signal(
     asset: &str,
     window: MarketWindow,
     now_ms: u64,
+    horizon_ms: u64,
     max_alignment_ms: u64,
 ) -> Option<AlignedSignal> {
-    let target_ts = window.end_time_ms.saturating_sub(SIGNAL_HORIZON_MS);
-    let mut best: Option<(AlloraMarketUpdate, u64)> = None;
+    let target_ts = window.end_time_ms.saturating_sub(horizon_ms);
+    let mut best_in_window: Option<(AlloraMarketUpdate, u64)> = None;
+    let mut best_carry: Option<(AlloraMarketUpdate, u64)> = None;
 
     for (key, update) in updates.iter() {
         if !key.starts_with(&format!("{asset}:")) {
@@ -656,29 +766,47 @@ fn select_aligned_5m_signal(
         if update.signal_timestamp_ms > now_ms {
             continue;
         }
-        if update.signal_timestamp_ms < window.start_time_ms
-            || update.signal_timestamp_ms > window.end_time_ms
+        if update.signal_timestamp_ms >= window.start_time_ms
+            && update.signal_timestamp_ms <= window.end_time_ms
         {
-            continue;
-        }
-
-        let diff = update.signal_timestamp_ms.abs_diff(target_ts);
-        if max_alignment_ms > 0 && diff > max_alignment_ms {
-            continue;
-        }
-
-        match best.as_ref() {
-            Some((_, best_diff)) if diff >= *best_diff => {}
-            _ => best = Some((update.clone(), diff)),
+            let diff = update.signal_timestamp_ms.abs_diff(target_ts);
+            match best_in_window.as_ref() {
+                Some((_, best_diff)) if diff >= *best_diff => {}
+                _ => best_in_window = Some((update.clone(), diff)),
+            }
+        } else if update.signal_timestamp_ms < window.start_time_ms {
+            let age = window
+                .start_time_ms
+                .saturating_sub(update.signal_timestamp_ms);
+            if age > horizon_ms {
+                continue;
+            }
+            let diff = update.signal_timestamp_ms.abs_diff(target_ts);
+            match best_carry.as_ref() {
+                Some((_, best_diff)) if diff >= *best_diff => {}
+                _ => best_carry = Some((update.clone(), diff)),
+            }
         }
     }
 
-    best.map(|(update, diff)| {
-        let denom = max_alignment_ms.max(1) as f64;
+    let (update, diff, carried_forward) = match (best_in_window, best_carry) {
+        (Some((update, diff)), _) => (update, diff, false),
+        (None, Some((update, diff))) => (update, diff, true),
+        (None, None) => return None,
+    };
+
+    Some({
+        let denom = if max_alignment_ms > 0 {
+            max_alignment_ms
+        } else {
+            horizon_ms
+        }
+        .max(1) as f64;
         let alignment = 1.0 - (diff as f64 / denom);
         AlignedSignal {
             update,
             alignment: alignment.clamp(0.0, 1.0),
+            carried_forward,
         }
     })
 }
@@ -687,6 +815,27 @@ fn resolve_chainlink_price(update: &ChainlinkMarketUpdate) -> Option<f64> {
     match update.last_price {
         Some(price) if price > 0.0 => Some(price),
         _ => None,
+    }
+}
+
+fn alignment_horizon_ms(config: &Config, asset: &str) -> u64 {
+    let base_ms = config
+        .execution
+        .signal_alignment_max_secs
+        .saturating_mul(1000);
+    let sol_ms = config
+        .execution
+        .signal_alignment_max_secs_sol
+        .saturating_mul(1000);
+    let selected = if asset.eq_ignore_ascii_case("SOL") && sol_ms > 0 {
+        sol_ms
+    } else {
+        base_ms
+    };
+    if selected > 0 {
+        selected
+    } else {
+        DEFAULT_SIGNAL_HORIZON_MS
     }
 }
 

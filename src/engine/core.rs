@@ -24,6 +24,7 @@ use crate::telemetry::metrics;
 
 const ENGINE_TICK_INTERVAL: Duration = Duration::from_secs(5);
 const NEUTRAL_SIGNAL_THRESHOLD_PCT: f64 = 0.001;
+const DEFAULT_SIGNAL_HORIZON_MS: u64 = 5 * 60 * 1_000;
 
 pub struct EngineCore {
     config: Arc<ArcSwap<Config>>,
@@ -121,6 +122,19 @@ impl EngineCore {
         if !is_five_min_signal(&update) {
             return Ok(());
         }
+        let mut update = update;
+        let config = self.config.load_full();
+        let horizon_ms = alignment_horizon_ms(&config, &update.asset);
+        if let Some(prev) = state.last_allora.get(&update.asset) {
+            if update.inference_value == prev.inference_value && prev.signal_timestamp_ms > 0 {
+                let diff = update
+                    .signal_timestamp_ms
+                    .saturating_sub(prev.signal_timestamp_ms);
+                if diff < horizon_ms {
+                    update.signal_timestamp_ms = prev.signal_timestamp_ms;
+                }
+            }
+        }
         state
             .last_allora
             .insert(update.asset.clone(), update.clone());
@@ -141,6 +155,27 @@ impl EngineCore {
             metrics::record_latency_ms(latency_ms as f64);
         }
         Ok(())
+    }
+}
+
+fn alignment_horizon_ms(config: &Config, asset: &str) -> u64 {
+    let base_ms = config
+        .execution
+        .signal_alignment_max_secs
+        .saturating_mul(1000);
+    let sol_ms = config
+        .execution
+        .signal_alignment_max_secs_sol
+        .saturating_mul(1000);
+    let selected = if asset.eq_ignore_ascii_case("SOL") && sol_ms > 0 {
+        sol_ms
+    } else {
+        base_ms
+    };
+    if selected > 0 {
+        selected
+    } else {
+        DEFAULT_SIGNAL_HORIZON_MS
     }
 }
 

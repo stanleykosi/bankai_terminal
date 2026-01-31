@@ -151,6 +151,8 @@ pub struct ExecutionConfig {
     pub no_money_mode: bool,
     #[serde(default = "default_execution_signal_alignment_max_secs")]
     pub signal_alignment_max_secs: u64,
+    #[serde(default = "default_execution_signal_alignment_max_secs_sol")]
+    pub signal_alignment_max_secs_sol: u64,
     #[serde(default = "default_execution_take_profit_bps")]
     pub take_profit_bps: f64,
     #[serde(default = "default_execution_stop_loss_bps")]
@@ -194,6 +196,7 @@ impl Default for ExecutionConfig {
             bankroll_refresh_secs: default_execution_bankroll_refresh_secs(),
             no_money_mode: default_execution_no_money_mode(),
             signal_alignment_max_secs: default_execution_signal_alignment_max_secs(),
+            signal_alignment_max_secs_sol: default_execution_signal_alignment_max_secs_sol(),
             take_profit_bps: default_execution_take_profit_bps(),
             stop_loss_bps: default_execution_stop_loss_bps(),
             trailing_stop_bps: default_execution_trailing_stop_bps(),
@@ -444,6 +447,10 @@ fn default_execution_no_money_mode() -> bool {
 
 fn default_execution_signal_alignment_max_secs() -> u64 {
     120
+}
+
+fn default_execution_signal_alignment_max_secs_sol() -> u64 {
+    210
 }
 
 fn default_execution_take_profit_bps() -> f64 {

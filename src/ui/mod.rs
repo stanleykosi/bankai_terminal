@@ -217,6 +217,8 @@ struct MarketSnapshot {
     start_price: Option<f64>,
     inference_5m: Option<f64>,
     signal_timestamp_ms: Option<u64>,
+    last_signature: Option<String>,
+    last_request_id: Option<String>,
     volatility_1m: Option<f64>,
     fee_rate_up_bps: Option<f64>,
     fee_rate_down_bps: Option<f64>,
@@ -245,6 +247,8 @@ impl MarketSnapshot {
             start_price: None,
             inference_5m: None,
             signal_timestamp_ms: None,
+            last_signature: None,
+            last_request_id: None,
             volatility_1m: None,
             fee_rate_up_bps: None,
             fee_rate_down_bps: None,
@@ -265,11 +269,29 @@ impl MarketSnapshot {
         self.last_chainlink_ms = Some(event_time);
     }
 
-    fn apply_allora(&mut self, update: &AlloraMarketUpdate) {
+    fn apply_allora(&mut self, update: &AlloraMarketUpdate, horizon_ms: u64) {
         match update.timeframe.to_ascii_lowercase().as_str() {
             "5m" => {
+                let same_value = self
+                    .inference_5m
+                    .map(|value| value == update.inference_value)
+                    .unwrap_or(false);
                 self.inference_5m = Some(update.inference_value);
-                self.signal_timestamp_ms = Some(update.signal_timestamp_ms);
+                let prev_ts = self.signal_timestamp_ms.unwrap_or(0);
+                if same_value && prev_ts > 0 {
+                    let diff = update.signal_timestamp_ms.saturating_sub(prev_ts);
+                    if diff >= horizon_ms {
+                        self.signal_timestamp_ms = Some(update.signal_timestamp_ms);
+                    }
+                } else {
+                    self.signal_timestamp_ms = Some(update.signal_timestamp_ms);
+                }
+                if update.signature.is_some() {
+                    self.last_signature = update.signature.clone();
+                }
+                if update.request_id.is_some() {
+                    self.last_request_id = update.request_id.clone();
+                }
             }
             _ => {}
         }
@@ -377,7 +399,9 @@ async fn snapshot_loop(
                             let entry = market_state
                                 .entry(key.clone())
                                 .or_insert_with(|| MarketSnapshot::new(key.clone()));
-                            entry.apply_allora(&update);
+                            let config_snapshot = config.load();
+                            let horizon_ms = alignment_horizon_ms(&config_snapshot, &key);
+                            entry.apply_allora(&update, horizon_ms);
                         }
                     },
                     Err(broadcast::error::RecvError::Closed) => break,
@@ -630,14 +654,9 @@ async fn estimate_vwap_price(
     let Some(implied_mid) = implied_mid else {
         return Ok(None);
     };
-    let alignment = alignment_factor(
-        snapshot,
-        now_ms,
-        config
-            .execution
-            .signal_alignment_max_secs
-            .saturating_mul(1000),
-    );
+    let horizon_ms = alignment_horizon_ms(config, &snapshot.asset);
+    let max_align_ms = horizon_ms;
+    let alignment = alignment_factor(snapshot, now_ms, horizon_ms, max_align_ms);
     let volatility_1m = snapshot
         .volatility_1m
         .unwrap_or(config.execution.min_volatility)
@@ -828,14 +847,9 @@ fn build_market_row(
         .implied_down_vwap
         .or_else(|| implied_up_vwap.map(|v| (1.0 - v).max(0.0)));
 
-    let alignment = alignment_factor(
-        snapshot,
-        now_ms,
-        config
-            .execution
-            .signal_alignment_max_secs
-            .saturating_mul(1000),
-    );
+    let horizon_ms = alignment_horizon_ms(config, &snapshot.asset);
+    let max_align_ms = horizon_ms;
+    let alignment = alignment_factor(snapshot, now_ms, horizon_ms, max_align_ms);
     let volatility_1m = snapshot
         .volatility_1m
         .unwrap_or(config.execution.min_volatility)
@@ -1122,23 +1136,57 @@ fn now_ms() -> Option<u64> {
     Some(now.as_millis() as u64)
 }
 
-fn alignment_factor(snapshot: &MarketSnapshot, now_ms: u64, max_alignment_ms: u64) -> Option<f64> {
+fn alignment_factor(
+    snapshot: &MarketSnapshot,
+    now_ms: u64,
+    horizon_ms: u64,
+    max_alignment_ms: u64,
+) -> Option<f64> {
     let signal_ts = snapshot.signal_timestamp_ms?;
     let window = snapshot.window?;
-    if signal_ts < window.start_time_ms || signal_ts > window.end_time_ms {
+    if signal_ts > window.end_time_ms {
         return None;
     }
-    if now_ms.saturating_sub(signal_ts) > SIGNAL_HORIZON_MS {
+    if signal_ts < window.start_time_ms {
+        let age = window.start_time_ms.saturating_sub(signal_ts);
+        if age > horizon_ms {
+            return None;
+        }
+    }
+    if now_ms.saturating_sub(signal_ts) > horizon_ms {
         return None;
     }
-    let target_ts = window.end_time_ms.saturating_sub(SIGNAL_HORIZON_MS);
+    let target_ts = window.end_time_ms.saturating_sub(horizon_ms);
     let diff = signal_ts.abs_diff(target_ts);
-    if max_alignment_ms > 0 && diff > max_alignment_ms {
-        return None;
+    let denom = if max_alignment_ms > 0 {
+        max_alignment_ms
+    } else {
+        horizon_ms
     }
-    let denom = max_alignment_ms.max(1) as f64;
+    .max(1) as f64;
     let alignment = 1.0 - (diff as f64 / denom);
     Some(alignment.clamp(0.0, 1.0))
+}
+
+fn alignment_horizon_ms(config: &Config, asset: &str) -> u64 {
+    let base_ms = config
+        .execution
+        .signal_alignment_max_secs
+        .saturating_mul(1000);
+    let sol_ms = config
+        .execution
+        .signal_alignment_max_secs_sol
+        .saturating_mul(1000);
+    let selected = if asset.eq_ignore_ascii_case("SOL") && sol_ms > 0 {
+        sol_ms
+    } else {
+        base_ms
+    };
+    if selected > 0 {
+        selected
+    } else {
+        SIGNAL_HORIZON_MS
+    }
 }
 
 fn compute_true_probability_5m(
