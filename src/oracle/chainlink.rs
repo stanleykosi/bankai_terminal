@@ -60,8 +60,17 @@ impl ChainlinkOracle {
 
     pub fn spawn(self, sender: broadcast::Sender<MarketUpdate>) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
-            if let Err(error) = self.run(sender).await {
-                tracing::error!(?error, "chainlink oracle stopped");
+            let config = self.config;
+            loop {
+                let oracle = ChainlinkOracle {
+                    config: config.clone(),
+                };
+                if let Err(error) = oracle.run(sender.clone()).await {
+                    tracing::error!(?error, "chainlink oracle stopped; restarting");
+                } else {
+                    tracing::warn!("chainlink oracle exited; restarting");
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }
         })
     }
@@ -74,6 +83,7 @@ impl ChainlinkOracle {
         let mut window_refresh = tokio::time::interval(self.config.window_refresh_interval);
         let mut ping_interval = tokio::time::interval(DEFAULT_PING_INTERVAL);
         let mut backoff = ReconnectBackoff::new();
+        let idle_timeout = Duration::from_secs(30);
 
         loop {
             let endpoint = self.config.endpoint.clone();
@@ -103,7 +113,7 @@ impl ChainlinkOracle {
                             )
                             .await;
                     }
-                    let delay = backoff.next_delay()?;
+                    let delay = backoff.next_delay();
                     tokio::time::sleep(delay).await;
                     continue;
                 }
@@ -121,7 +131,7 @@ impl ChainlinkOracle {
                         )
                         .await;
                 }
-                let delay = backoff.next_delay()?;
+                let delay = backoff.next_delay();
                 tokio::time::sleep(delay).await;
                 continue;
             }
@@ -131,6 +141,7 @@ impl ChainlinkOracle {
                     .await;
             }
 
+            let mut last_msg_ms = now_ms().unwrap_or(0);
             loop {
                 tokio::select! {
                     _ = window_refresh.tick() => {
@@ -144,6 +155,18 @@ impl ChainlinkOracle {
                         }
                     }
                     _ = ping_interval.tick() => {
+                        if now_ms().unwrap_or(0).saturating_sub(last_msg_ms) > idle_timeout.as_millis() as u64 {
+                            tracing::warn!(endpoint = %endpoint, "chainlink ws idle timeout; reconnecting");
+                            if let Some(redis) = self.config.redis.as_ref() {
+                                let _ = redis
+                                    .push_activity_log(
+                                        "[CHAINLINK] idle timeout; reconnecting",
+                                        ACTIVITY_LOG_LIMIT,
+                                    )
+                                    .await;
+                            }
+                            break;
+                        }
                         if let Err(error) = writer.send(Message::Ping(Vec::new())).await {
                             tracing::warn!(?error, "chainlink ws ping failed");
                             break;
@@ -152,6 +175,7 @@ impl ChainlinkOracle {
                     message = reader.next() => {
                         match message {
                             Some(Ok(Message::Text(text))) => {
+                                last_msg_ms = now_ms().unwrap_or(0);
                                 let event = match parse_event(&text) {
                                     Ok(value) => value,
                                     Err(error) => {
@@ -224,10 +248,14 @@ impl ChainlinkOracle {
                                 }
                             }
                             Some(Ok(Message::Ping(payload))) => {
+                                last_msg_ms = now_ms().unwrap_or(0);
                                 if let Err(error) = writer.send(Message::Pong(payload)).await {
                                     tracing::warn!(?error, "chainlink ws pong failed");
                                     break;
                                 }
+                            }
+                            Some(Ok(Message::Pong(_))) => {
+                                last_msg_ms = now_ms().unwrap_or(0);
                             }
                             Some(Ok(Message::Close(frame))) => {
                                 tracing::warn!(?frame, endpoint = %endpoint, "chainlink ws closed");
@@ -271,7 +299,7 @@ impl ChainlinkOracle {
                 }
             }
 
-            let delay = backoff.next_delay()?;
+            let delay = backoff.next_delay();
             tokio::time::sleep(delay).await;
         }
     }
@@ -296,14 +324,14 @@ impl ReconnectBackoff {
         self.attempts = 0;
     }
 
-    fn next_delay(&mut self) -> Result<Duration> {
+    fn next_delay(&mut self) -> Duration {
         self.attempts = self.attempts.saturating_add(1);
         let exp = self
             .base_ms
             .saturating_mul(2u64.saturating_pow(self.attempts.min(6)));
         let capped = exp.min(self.max_ms);
-        let jitter = compute_jitter(1_000)?;
-        Ok(Duration::from_millis(capped).saturating_add(jitter))
+        let jitter = compute_jitter(1_000).unwrap_or_else(|_| Duration::from_millis(0));
+        Duration::from_millis(capped).saturating_add(jitter)
     }
 }
 
