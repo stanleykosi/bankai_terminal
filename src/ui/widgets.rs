@@ -587,7 +587,7 @@ fn render_order_tape(frame: &mut Frame, area: Rect, snapshot: &UiSnapshot) {
         lines.push(Line::from("  --"));
     } else {
         for entry in snapshot.intent_log.iter().take(3) {
-            lines.push(Line::from(format!("  {entry}")));
+            lines.push(Line::from(format!("  {}", format_intent_entry(entry))));
         }
     }
     lines.push(Line::from(""));
@@ -607,6 +607,34 @@ fn render_order_tape(frame: &mut Frame, area: Rect, snapshot: &UiSnapshot) {
         .block(block)
         .alignment(Alignment::Left);
     frame.render_widget(paragraph, area);
+}
+
+fn format_intent_entry(entry: &str) -> String {
+    let mut asset = "";
+    let mut side = "";
+    if let Some(idx) = entry.find("[INTENT]") {
+        let rest = &entry[(idx + "[INTENT]".len())..];
+        let mut parts = rest.split_whitespace();
+        asset = parts.next().unwrap_or("");
+        side = parts.next().unwrap_or("");
+    }
+    let outcome = entry
+        .split("outcome=")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .unwrap_or("");
+    let implied = entry
+        .split("implied=")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .unwrap_or("");
+
+    if !asset.is_empty() && !implied.is_empty() {
+        let label = if !outcome.is_empty() { outcome } else { side };
+        format!("{asset} {label} implied={implied}")
+    } else {
+        entry.to_string()
+    }
 }
 
 fn format_duration(duration: std::time::Duration) -> String {

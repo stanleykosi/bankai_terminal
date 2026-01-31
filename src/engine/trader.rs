@@ -602,8 +602,30 @@ impl TradingEngine {
             crate::engine::types::TradeSide::Buy => "BUY",
             crate::engine::types::TradeSide::Sell => "SELL",
         };
+        let outcome = match self.redis.get_market_metadata(&intent.market_id).await {
+            Ok(metadata) => {
+                if metadata
+                    .outcome_up_token_id
+                    .as_ref()
+                    .map(|id| id == &intent.asset_id)
+                    .unwrap_or(false)
+                {
+                    "UP"
+                } else if metadata
+                    .outcome_down_token_id
+                    .as_ref()
+                    .map(|id| id == &intent.asset_id)
+                    .unwrap_or(false)
+                {
+                    "DOWN"
+                } else {
+                    "UNKNOWN"
+                }
+            }
+            Err(_) => "UNKNOWN",
+        };
         let message = format!(
-            "{prefix} [INTENT] {asset} {side} mode={:?} edge_bps={:.1} implied={:.4} true={:.4} market={} token={}",
+            "{prefix} [INTENT] {asset} {side} outcome={outcome} mode={:?} edge_bps={:.1} implied={:.4} true={:.4} market={} token={}",
             intent.mode,
             intent.edge_bps,
             intent.implied_prob,
