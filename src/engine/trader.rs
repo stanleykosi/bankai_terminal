@@ -33,7 +33,7 @@ const DEFAULT_TICK_INTERVAL: Duration = Duration::from_secs(5);
 const ACTIVITY_LOG_LIMIT: usize = 50;
 const DEFAULT_SIGNAL_HORIZON_MS: u64 = 5 * 60 * 1_000;
 const SQRT_5: f64 = 2.236_067_977_5;
-const ORDERBOOK_STALE_MS: u64 = 5_000;
+const ORDERBOOK_STALE_MS: u64 = 25_000;
 
 pub struct TradingEngine {
     config: Arc<ArcSwap<Config>>,
@@ -314,6 +314,33 @@ impl TradingEngine {
             return Ok(());
         }
 
+        if let Some(last_window) = state.last_intent_window_start_ms.get(asset) {
+            if *last_window == window.start_time_ms {
+                self.log_blocker(
+                    state,
+                    asset,
+                    "intent_already_emitted",
+                    "intent already emitted for this window; skipping",
+                    now,
+                )
+                .await;
+                return Ok(());
+            }
+        }
+
+        let target_ts = window.end_time_ms.saturating_sub(horizon_ms);
+        if now < target_ts {
+            self.log_blocker(
+                state,
+                asset,
+                "waiting_for_target",
+                "waiting for target timestamp; skipping",
+                now,
+            )
+            .await;
+            return Ok(());
+        }
+
         let mut implied_up = self.orderbook.mid_price(&up_token).await?;
         let mut implied_down = self.orderbook.mid_price(&down_token).await?;
         if is_orderbook_stale(&self.orderbook, &up_token, now).await? {
@@ -532,6 +559,9 @@ impl TradingEngine {
             self.log_intent(asset, &intent).await;
             let _ = self.intent_tx.send(intent).await;
             state.last_intent_ms.insert(asset.to_string(), now);
+            state
+                .last_intent_window_start_ms
+                .insert(asset.to_string(), window.start_time_ms);
         } else {
             let last = state
                 .last_no_intent_alert_ms
@@ -712,6 +742,7 @@ struct TraderState {
     last_chainlink: HashMap<String, ChainlinkMarketUpdate>,
     last_allora: HashMap<String, AlloraMarketUpdate>,
     last_intent_ms: HashMap<String, u64>,
+    last_intent_window_start_ms: HashMap<String, u64>,
     last_signal_miss_ms: HashMap<String, u64>,
     last_signal_stale_ms: HashMap<String, u64>,
     last_fee_alert_ms: HashMap<String, u64>,
@@ -727,6 +758,7 @@ impl TraderState {
             last_chainlink: HashMap::new(),
             last_allora: HashMap::new(),
             last_intent_ms: HashMap::new(),
+            last_intent_window_start_ms: HashMap::new(),
             last_signal_miss_ms: HashMap::new(),
             last_signal_stale_ms: HashMap::new(),
             last_fee_alert_ms: HashMap::new(),

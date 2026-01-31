@@ -87,11 +87,17 @@ pub async fn record_no_money_intent(redis: &RedisManager, intent: &TradeIntent) 
 
 async fn run_tracker(config: Arc<ArcSwap<Config>>, redis: RedisManager) -> Result<()> {
     let mut tick = tokio::time::interval(Duration::from_secs(1));
+    let mut reset_done = false;
     loop {
         tick.tick().await;
         let cfg = config.load_full();
         if !cfg.execution.no_money_mode {
+            reset_done = false;
             continue;
+        }
+        if !reset_done {
+            reset_paper_state(&redis).await?;
+            reset_done = true;
         }
 
         let now = now_ms()?;
@@ -171,6 +177,19 @@ async fn run_tracker(config: Arc<ArcSwap<Config>>, redis: RedisManager) -> Resul
             let _ = redis.del(&key).await;
         }
     }
+}
+
+async fn reset_paper_state(redis: &RedisManager) -> Result<()> {
+    let pending = redis.zrange_with_scores(PAPER_ZSET_KEY, 0, -1).await?;
+    for (key, _) in pending {
+        let _ = redis.del(&key).await;
+    }
+    let _ = redis.del(PAPER_ZSET_KEY).await;
+    let _ = redis.del(PAPER_STATS_WINS).await;
+    let _ = redis.del(PAPER_STATS_LOSSES).await;
+    let _ = redis.del(PAPER_STATS_TOTAL).await;
+    let _ = redis.del(PAPER_STATS_ACCURACY).await;
+    Ok(())
 }
 
 async fn resolve_asset_for_market(redis: &RedisManager, market_id: &str) -> Result<String> {
