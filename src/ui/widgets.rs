@@ -610,9 +610,16 @@ fn render_order_tape(frame: &mut Frame, area: Rect, snapshot: &UiSnapshot) {
 }
 
 fn format_intent_entry(entry: &str) -> String {
+    let mut prefix = "";
     let mut asset = "";
     let mut side = "";
     if let Some(idx) = entry.find("[INTENT]") {
+        let before = entry[..idx].trim();
+        if let Some(first) = before.split_whitespace().next() {
+            if first.starts_with('[') && first.ends_with(']') {
+                prefix = first;
+            }
+        }
         let rest = &entry[(idx + "[INTENT]".len())..];
         let mut parts = rest.split_whitespace();
         asset = parts.next().unwrap_or("");
@@ -631,7 +638,11 @@ fn format_intent_entry(entry: &str) -> String {
 
     if !asset.is_empty() && !implied.is_empty() {
         let label = if !outcome.is_empty() { outcome } else { side };
-        format!("{asset} {label} implied={implied}")
+        if !prefix.is_empty() {
+            format!("{prefix} {asset} {label} implied={implied}")
+        } else {
+            format!("{asset} {label} implied={implied}")
+        }
     } else {
         entry.to_string()
     }

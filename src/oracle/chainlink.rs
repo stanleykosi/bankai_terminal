@@ -324,6 +324,7 @@ struct AssetState {
     anchor_start_ms: Option<u64>,
     recorded_start_ms: Option<u64>,
     recorded_end_ms: Option<u64>,
+    last_event_time_ms: Option<u64>,
 }
 
 impl AssetState {
@@ -338,6 +339,7 @@ impl AssetState {
             anchor_start_ms: None,
             recorded_start_ms: None,
             recorded_end_ms: None,
+            last_event_time_ms: None,
         }
     }
 
@@ -356,6 +358,7 @@ impl AssetState {
             self.volatility.reset(Duration::from_millis(interval_ms));
             self.recorded_start_ms = None;
             self.recorded_end_ms = None;
+            self.last_event_time_ms = None;
         }
     }
 
@@ -388,10 +391,12 @@ impl AssetState {
         if self.recorded_end_ms == Some(end_ms) {
             return None;
         }
-        if event_time_ms < end_ms {
+        let last_event = self.last_event_time_ms.unwrap_or(event_time_ms);
+        if event_time_ms < end_ms && last_event < end_ms {
             return None;
         }
         self.recorded_end_ms = Some(end_ms);
+        self.last_event_time_ms = Some(event_time_ms);
         Some((end_ms, price))
     }
 
@@ -402,6 +407,7 @@ impl AssetState {
     ) -> Result<Option<ChainlinkMarketUpdate>> {
         self.update_candle(event.event_time_ms, event.price);
         self.last_price = Some(event.price);
+        self.last_event_time_ms = Some(event.event_time_ms);
         if let Some(vol) = self.volatility.update(event.price, event.event_time_ms) {
             self.last_volatility = Some(vol);
         }
