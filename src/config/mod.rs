@@ -55,6 +55,8 @@ pub struct EndpointConfig {
 pub struct TradingConfig {
     pub max_volatility: f64,
     pub kill_switch_latency_ms: u64,
+    pub kill_switch_latency_consecutive: u32,
+    pub kill_switch_latency_recovery: u32,
     pub kill_switch_clock_drift_ms: u64,
     pub kill_switch_consecutive_losses: u32,
 }

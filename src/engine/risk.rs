@@ -18,6 +18,8 @@ use crate::error::{BankaiError, Result};
 #[derive(Debug, Clone)]
 pub struct KillSwitchConfig {
     pub latency_ms: u64,
+    pub latency_consecutive: u32,
+    pub latency_recovery: u32,
     pub clock_drift_ms: i64,
     pub consecutive_losses: u32,
 }
@@ -26,6 +28,8 @@ impl KillSwitchConfig {
     pub fn from_trading(trading: &TradingConfig) -> Self {
         Self {
             latency_ms: trading.kill_switch_latency_ms,
+            latency_consecutive: trading.kill_switch_latency_consecutive.max(1),
+            latency_recovery: trading.kill_switch_latency_recovery.max(1),
             clock_drift_ms: trading.kill_switch_clock_drift_ms as i64,
             consecutive_losses: trading.kill_switch_consecutive_losses,
         }
@@ -70,6 +74,8 @@ pub struct RiskState {
     last_latency_ms: AtomicU64,
     clock_drift_ms: AtomicI64,
     consecutive_losses: AtomicU32,
+    latency_breaches: AtomicU32,
+    latency_recovery: AtomicU32,
 }
 
 impl RiskState {
@@ -81,6 +87,8 @@ impl RiskState {
             last_latency_ms: AtomicU64::new(0),
             clock_drift_ms: AtomicI64::new(0),
             consecutive_losses: AtomicU32::new(0),
+            latency_breaches: AtomicU32::new(0),
+            latency_recovery: AtomicU32::new(0),
         }
     }
 
@@ -119,6 +127,8 @@ impl RiskState {
         self.halted.store(false, Ordering::SeqCst);
         self.halt_reason
             .store(HaltReason::None as u8, Ordering::SeqCst);
+        self.latency_breaches.store(0, Ordering::SeqCst);
+        self.latency_recovery.store(0, Ordering::SeqCst);
     }
 
     pub fn is_halted(&self) -> bool {
@@ -143,8 +153,22 @@ impl RiskState {
         let config = self.config.load();
         let latency_ms = self.last_latency_ms.load(Ordering::Relaxed);
         if latency_ms > config.latency_ms {
-            self.trigger_halt(HaltReason::Latency);
-            return true;
+            let breaches = self.latency_breaches.fetch_add(1, Ordering::Relaxed) + 1;
+            self.latency_recovery.store(0, Ordering::Relaxed);
+            if breaches >= config.latency_consecutive {
+                self.trigger_halt(HaltReason::Latency);
+                return true;
+            }
+        } else {
+            self.latency_breaches.store(0, Ordering::Relaxed);
+            if self.halt_reason() == HaltReason::Latency {
+                let recovery = self.latency_recovery.fetch_add(1, Ordering::Relaxed) + 1;
+                if recovery >= config.latency_recovery {
+                    self.clear_halt();
+                }
+            } else {
+                self.latency_recovery.store(0, Ordering::Relaxed);
+            }
         }
 
         let drift_ms = self.clock_drift_ms.load(Ordering::Relaxed).abs();
@@ -217,6 +241,8 @@ mod tests {
     fn test_config() -> KillSwitchConfig {
         KillSwitchConfig {
             latency_ms: 100,
+            latency_consecutive: 2,
+            latency_recovery: 2,
             clock_drift_ms: 50,
             consecutive_losses: 2,
         }
@@ -230,6 +256,7 @@ mod tests {
         assert!(!state.record_latency_ms(80));
         assert!(!state.is_halted());
 
+        assert!(!state.record_latency_ms(150));
         assert!(state.record_latency_ms(150));
         assert!(state.is_halted());
         assert_eq!(state.halt_reason(), HaltReason::Latency);

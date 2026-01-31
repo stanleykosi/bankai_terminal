@@ -33,7 +33,7 @@ const DEFAULT_TICK_INTERVAL: Duration = Duration::from_secs(5);
 const ACTIVITY_LOG_LIMIT: usize = 50;
 const DEFAULT_SIGNAL_HORIZON_MS: u64 = 5 * 60 * 1_000;
 const SQRT_5: f64 = 2.236_067_977_5;
-const ORDERBOOK_STALE_MS: u64 = 25_000;
+const ORDERBOOK_STALE_MS: u64 = 30_000;
 
 pub struct TradingEngine {
     config: Arc<ArcSwap<Config>>,
@@ -78,7 +78,8 @@ impl TradingEngine {
     }
 
     async fn run(self, mut receiver: broadcast::Receiver<MarketUpdate>) -> Result<()> {
-        let mut state = TraderState::new();
+        let boot_time_ms = now_ms()?;
+        let mut state = TraderState::new(boot_time_ms);
         let mut tick = tokio::time::interval(DEFAULT_TICK_INTERVAL);
 
         loop {
@@ -196,6 +197,18 @@ impl TradingEngine {
             start_time_ms: asset_window.start_time_ms,
             end_time_ms: asset_window.end_time_ms,
         };
+
+        if window.start_time_ms <= state.boot_time_ms {
+            self.log_blocker(
+                state,
+                asset,
+                "waiting_next_window",
+                "waiting for next market window after restart",
+                now,
+            )
+            .await;
+            return Ok(());
+        }
 
         let horizon_ms = alignment_horizon_ms(&config, asset);
         let max_align_ms = horizon_ms;
@@ -750,10 +763,11 @@ struct TraderState {
     last_min_order_alert_ms: HashMap<String, u64>,
     last_no_intent_alert_ms: HashMap<String, u64>,
     last_blocker_alert_ms: HashMap<String, u64>,
+    boot_time_ms: u64,
 }
 
 impl TraderState {
-    fn new() -> Self {
+    fn new(boot_time_ms: u64) -> Self {
         Self {
             last_chainlink: HashMap::new(),
             last_allora: HashMap::new(),
@@ -766,6 +780,7 @@ impl TraderState {
             last_min_order_alert_ms: HashMap::new(),
             last_no_intent_alert_ms: HashMap::new(),
             last_blocker_alert_ms: HashMap::new(),
+            boot_time_ms,
         }
     }
 }
