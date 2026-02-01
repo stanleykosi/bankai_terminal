@@ -503,6 +503,40 @@ impl RedisManager {
         }
     }
 
+    pub async fn set_asset_start_price_window(
+        &self,
+        asset: &str,
+        start_time_ms: u64,
+        price: f64,
+        updated_at_ms: u64,
+    ) -> Result<()> {
+        let key = asset_start_price_window_key(asset, start_time_ms);
+        let mut conn = self.connection.clone();
+        conn.hset::<_, _, _, ()>(key.as_str(), "startTimeMs", start_time_ms as i64)
+            .await?;
+        conn.hset::<_, _, _, ()>(key.as_str(), "price", price)
+            .await?;
+        conn.hset::<_, _, _, ()>(key.as_str(), "updatedAtMs", updated_at_ms as i64)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn get_asset_start_price_window(
+        &self,
+        asset: &str,
+        start_time_ms: u64,
+    ) -> Result<Option<(u64, f64)>> {
+        let key = asset_start_price_window_key(asset, start_time_ms);
+        let start_time_ms = self.hget_i64(&key, "startTimeMs").await?;
+        let price = self.hget_float(&key, "price").await?;
+        match (start_time_ms, price) {
+            (Some(start), Some(price)) if start > 0 && price > 0.0 => {
+                Ok(Some((start as u64, price)))
+            }
+            _ => Ok(None),
+        }
+    }
+
     pub async fn set_asset_end_price(
         &self,
         asset: &str,
@@ -523,6 +557,38 @@ impl RedisManager {
 
     pub async fn get_asset_end_price(&self, asset: &str) -> Result<Option<(u64, f64)>> {
         let key = asset_end_price_key(asset);
+        let end_time_ms = self.hget_i64(&key, "endTimeMs").await?;
+        let price = self.hget_float(&key, "price").await?;
+        match (end_time_ms, price) {
+            (Some(end), Some(price)) if end > 0 && price > 0.0 => Ok(Some((end as u64, price))),
+            _ => Ok(None),
+        }
+    }
+
+    pub async fn set_asset_end_price_window(
+        &self,
+        asset: &str,
+        end_time_ms: u64,
+        price: f64,
+        updated_at_ms: u64,
+    ) -> Result<()> {
+        let key = asset_end_price_window_key(asset, end_time_ms);
+        let mut conn = self.connection.clone();
+        conn.hset::<_, _, _, ()>(key.as_str(), "endTimeMs", end_time_ms as i64)
+            .await?;
+        conn.hset::<_, _, _, ()>(key.as_str(), "price", price)
+            .await?;
+        conn.hset::<_, _, _, ()>(key.as_str(), "updatedAtMs", updated_at_ms as i64)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn get_asset_end_price_window(
+        &self,
+        asset: &str,
+        end_time_ms: u64,
+    ) -> Result<Option<(u64, f64)>> {
+        let key = asset_end_price_window_key(asset, end_time_ms);
         let end_time_ms = self.hget_i64(&key, "endTimeMs").await?;
         let price = self.hget_float(&key, "price").await?;
         match (end_time_ms, price) {
@@ -745,6 +811,14 @@ fn asset_window_cache_key(asset: &str) -> String {
 
 fn fee_rate_key(token_id: &str) -> String {
     format!("{FEE_RATE_PREFIX}{token_id}")
+}
+
+fn asset_start_price_window_key(asset: &str, start_time_ms: u64) -> String {
+    format!("asset:start:{asset}:{start_time_ms}")
+}
+
+fn asset_end_price_window_key(asset: &str, end_time_ms: u64) -> String {
+    format!("asset:end:{asset}:{end_time_ms}")
 }
 
 fn asset_start_price_key(asset: &str) -> String {

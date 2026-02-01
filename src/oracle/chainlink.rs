@@ -223,12 +223,21 @@ impl ChainlinkOracle {
                                         .or_insert_with(|| AssetState::new(self.config.candle_interval));
                                     if let Some(window) = asset_windows.get(&asset_key) {
                                         state.set_window(window);
-                                        if let (Some(redis), Some((start_ms, price))) =
-                                            (self.config.redis.as_ref(), state.take_start_price_if_ready(window))
-                                        {
+                                        if let (Some(redis), Some((start_ms, price))) = (
+                                            self.config.redis.as_ref(),
+                                            state.take_start_price_if_ready(window),
+                                        ) {
                                             let now = now_ms().unwrap_or(0);
                                             let _ = redis
                                                 .set_asset_start_price(&asset_key, start_ms, price, now)
+                                                .await;
+                                            let _ = redis
+                                                .set_asset_start_price_window(
+                                                    &asset_key,
+                                                    start_ms,
+                                                    price,
+                                                    now,
+                                                )
                                                 .await;
                                         }
                                         if let (Some(redis), Some((end_ms, price))) = (
@@ -242,6 +251,14 @@ impl ChainlinkOracle {
                                             let now = now_ms().unwrap_or(0);
                                             let _ = redis
                                                 .set_asset_end_price(&asset_key, end_ms, price, now)
+                                                .await;
+                                            let _ = redis
+                                                .set_asset_end_price_window(
+                                                    &asset_key,
+                                                    end_ms,
+                                                    price,
+                                                    now,
+                                                )
                                                 .await;
                                         }
                                     }
@@ -610,7 +627,11 @@ fn subscribe_payload(symbols: &[String]) -> Result<String> {
 }
 
 fn parse_event(text: &str) -> Result<Option<ChainlinkEvent>> {
-    let raw: Value = serde_json::from_str(text)?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() || !trimmed.starts_with('{') {
+        return Ok(None);
+    }
+    let raw: Value = serde_json::from_str(trimmed)?;
     let topic = raw
         .get("topic")
         .and_then(|value| value.as_str())

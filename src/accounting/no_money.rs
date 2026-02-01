@@ -190,7 +190,9 @@ async fn run_tracker(config: Arc<ArcSwap<Config>>, redis: RedisManager) -> Resul
                 }
             };
 
-            let Some((start_ms, start_price)) = redis.get_asset_start_price(&record.asset).await?
+            let Some((start_ms, start_price)) = redis
+                .get_asset_start_price_window(&record.asset, record.start_time_ms)
+                .await?
             else {
                 if now.saturating_sub(record.end_time_ms) > PAPER_SETTLE_GRACE_MS {
                     record_missed(
@@ -205,21 +207,10 @@ async fn run_tracker(config: Arc<ArcSwap<Config>>, redis: RedisManager) -> Resul
                 }
                 continue;
             };
-            if start_ms != record.start_time_ms {
-                if now.saturating_sub(record.end_time_ms) > PAPER_SETTLE_GRACE_MS {
-                    record_missed(
-                        &redis,
-                        &record,
-                        "start_price_mismatch",
-                        "start price mismatch after grace",
-                    )
-                    .await;
-                    let _ = redis.zrem(PAPER_ZSET_KEY, &key).await;
-                    let _ = redis.del(&key).await;
-                }
-                continue;
-            }
-            let Some((end_ms, end_price)) = redis.get_asset_end_price(&record.asset).await? else {
+            let Some((end_ms, end_price)) = redis
+                .get_asset_end_price_window(&record.asset, record.end_time_ms)
+                .await?
+            else {
                 if now.saturating_sub(record.end_time_ms) > PAPER_SETTLE_GRACE_MS {
                     record_missed(
                         &redis,
@@ -233,20 +224,7 @@ async fn run_tracker(config: Arc<ArcSwap<Config>>, redis: RedisManager) -> Resul
                 }
                 continue;
             };
-            if end_ms != record.end_time_ms {
-                if now.saturating_sub(record.end_time_ms) > PAPER_SETTLE_GRACE_MS {
-                    record_missed(
-                        &redis,
-                        &record,
-                        "end_price_mismatch",
-                        "end price mismatch after grace",
-                    )
-                    .await;
-                    let _ = redis.zrem(PAPER_ZSET_KEY, &key).await;
-                    let _ = redis.del(&key).await;
-                }
-                continue;
-            }
+            let _ = (start_ms, end_ms);
 
             if !record.filled {
                 let reason = record
