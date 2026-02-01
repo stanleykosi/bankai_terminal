@@ -55,7 +55,7 @@
     "allowance_check_interval_secs": 600,
     "trade_reconcile_interval_secs": 10,
     "no_money_mode": true,
-    "paper_stats_persist": true,
+    "paper_stats_persist": false,
     "paper_start_bankroll_usdc": 50.0,
     "paper_latency_ms": 20000,
     "paper_slippage_bps": 5.0,
