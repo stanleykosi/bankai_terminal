@@ -704,16 +704,6 @@ async fn estimate_vwap_price(
         .volatility_1m
         .unwrap_or(config.execution.min_volatility)
         .max(config.execution.min_volatility);
-    let signal_context = match (snapshot.start_price, snapshot.inference_5m, alignment) {
-        (Some(start_price), Some(predicted), Some(alignment)) => compute_signal_context(
-            start_price,
-            predicted,
-            volatility_1m,
-            config.execution.probability_scale,
-            alignment,
-        ),
-        _ => None,
-    };
     let true_up = match (snapshot.start_price, snapshot.inference_5m, alignment) {
         (Some(start_price), Some(predicted), Some(alignment)) => Some(compute_true_probability_5m(
             start_price,
@@ -907,6 +897,16 @@ fn build_market_row(
         .volatility_1m
         .unwrap_or(config.execution.min_volatility)
         .max(config.execution.min_volatility);
+    let signal_context = match (snapshot.start_price, snapshot.inference_5m, alignment) {
+        (Some(start_price), Some(predicted), Some(alignment)) => compute_signal_context(
+            start_price,
+            predicted,
+            volatility_1m,
+            config.execution.probability_scale,
+            alignment,
+        ),
+        _ => None,
+    };
 
     let true_up = match (snapshot.start_price, snapshot.inference_5m, alignment) {
         (Some(start_price), Some(predicted), Some(alignment)) => Some(compute_true_probability_5m(
@@ -1286,7 +1286,6 @@ fn alignment_horizon_ms(config: &Config, asset: &str) -> u64 {
 struct SignalContext {
     direction: i8,
     confidence: f64,
-    z_score: f64,
 }
 
 fn compute_signal_context(
@@ -1314,7 +1313,6 @@ fn compute_signal_context(
     Some(SignalContext {
         direction,
         confidence: confidence.clamp(0.0, 1.0),
-        z_score: z_scaled,
     })
 }
 

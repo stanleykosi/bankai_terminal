@@ -896,7 +896,6 @@ struct AlignedSignal {
 struct SignalContext {
     direction: i8,
     confidence: f64,
-    z_score: f64,
 }
 
 fn select_aligned_5m_signal(
@@ -1019,7 +1018,6 @@ fn compute_signal_context(
     Some(SignalContext {
         direction,
         confidence: confidence.clamp(0.0, 1.0),
-        z_score: z_scaled,
     })
 }
 
@@ -1223,7 +1221,6 @@ mod tests {
         let signal = SignalContext {
             direction: SIGNAL_DIR_DOWN,
             confidence: 0.9,
-            z_score: -1.2,
         };
         assert!(signal_allows_direction(
             &execution,
@@ -1241,7 +1238,6 @@ mod tests {
         let signal = SignalContext {
             direction: SIGNAL_DIR_DOWN,
             confidence: 0.9,
-            z_score: -1.2,
         };
         assert!(!signal_allows_direction(
             &execution,
@@ -1260,7 +1256,6 @@ mod tests {
         let signal = SignalContext {
             direction: SIGNAL_DIR_DOWN,
             confidence: 0.9,
-            z_score: -1.2,
         };
         assert!(signal_allows_direction(
             &execution,
