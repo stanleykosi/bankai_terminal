@@ -97,13 +97,25 @@ fn render_paper_stats(frame: &mut Frame, area: Rect, stats: Option<&PaperStatsDa
         .style(Style::default().fg(Color::Cyan));
     let mut lines = Vec::new();
     if let Some(stats) = stats {
+        lines.push(Line::from(format!(
+            "Bankroll: {:.2} ({:+.2}%)",
+            stats.bankroll_usdc, stats.roi_pct
+        )));
+        lines.push(Line::from(format!(
+            "Win CI (95%): {:.1}-{:.1}%",
+            stats.win_rate_ci_low, stats.win_rate_ci_high
+        )));
         lines.push(Line::from(format!("Wins: {:.0}", stats.wins)));
         lines.push(Line::from(format!("Losses: {:.0}", stats.losses)));
+        lines.push(Line::from(format!("Missed: {:.0}", stats.missed)));
         lines.push(Line::from(format!("Total: {:.0}", stats.total)));
         lines.push(Line::from(format!("Accuracy: {:.2}%", stats.accuracy_pct)));
     } else {
+        lines.push(Line::from("Bankroll: --"));
+        lines.push(Line::from("Win CI (95%): --"));
         lines.push(Line::from("Wins: --"));
         lines.push(Line::from("Losses: --"));
+        lines.push(Line::from("Missed: --"));
         lines.push(Line::from("Total: --"));
         lines.push(Line::from("Accuracy: --"));
     }

@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 
-use crate::accounting::no_money::record_no_money_intent;
+use crate::accounting::no_money::{record_no_money_intent, PaperSimConfig};
 use crate::engine::types::{TradeIntent, TradeMode, TradeSide};
 use crate::error::{BankaiError, Result};
 use crate::execution::cancel::CancelClient;
@@ -113,6 +113,7 @@ pub struct ExecutionOrchestrator {
     activity_redis: Option<RedisManager>,
     wallet_key: Option<String>,
     builder: Arc<dyn ExecutionPayloadBuilder>,
+    paper_sim: Option<PaperSimConfig>,
 }
 
 impl ExecutionOrchestrator {
@@ -126,6 +127,7 @@ impl ExecutionOrchestrator {
         activity_redis: Option<RedisManager>,
         wallet_key: Option<String>,
         builder: Arc<dyn ExecutionPayloadBuilder>,
+        paper_sim: Option<PaperSimConfig>,
     ) -> Result<Self> {
         if let Some(manager) = nonce_manager.as_ref() {
             if let Some(direct) = direct.as_ref() {
@@ -148,6 +150,7 @@ impl ExecutionOrchestrator {
             activity_redis,
             wallet_key,
             builder,
+            paper_sim,
         })
     }
 
@@ -178,7 +181,9 @@ impl ExecutionOrchestrator {
 
         if self.config.no_money_mode {
             if let Some(redis) = self.activity_redis.as_ref() {
-                let _ = record_no_money_intent(redis, &intent).await;
+                if let Some(sim) = self.paper_sim.as_ref() {
+                    let _ = record_no_money_intent(redis, &intent, sim).await;
+                }
                 self.log_activity_event(format!(
                     "[PAPER] intent captured market={} mode={} edge_bps={:.1}",
                     intent.market_id,

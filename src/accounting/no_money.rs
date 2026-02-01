@@ -14,6 +14,7 @@ use tokio::task::JoinHandle;
 use crate::config::Config;
 use crate::engine::types::{TradeIntent, TradeMode, TradeSide};
 use crate::error::{BankaiError, Result};
+use crate::storage::orderbook::{BookSide, OrderBookStore};
 use crate::storage::redis::{MarketMetadata, RedisManager};
 use arc_swap::ArcSwap;
 
@@ -22,7 +23,38 @@ const PAPER_STATS_WINS: &str = "paper:stats:wins";
 const PAPER_STATS_LOSSES: &str = "paper:stats:losses";
 const PAPER_STATS_TOTAL: &str = "paper:stats:total";
 const PAPER_STATS_ACCURACY: &str = "paper:stats:accuracy_pct";
+const PAPER_STATS_MISSED: &str = "paper:stats:missed";
+const PAPER_BANKROLL_KEY: &str = "paper:bankroll:usdc";
+const PAPER_BANKROLL_START_KEY: &str = "paper:bankroll:start_usdc";
 const PAPER_LOG_LIMIT: usize = 200;
+const PAPER_VWAP_LEVELS: usize = 50;
+
+#[derive(Debug, Clone)]
+pub struct PaperSimConfig {
+    pub start_bankroll_usdc: f64,
+    pub kelly_fraction: f64,
+    pub min_order_usdc: f64,
+    pub max_order_usdc: f64,
+    pub default_order_usdc: f64,
+    pub slippage_bps: f64,
+    pub latency_ms: u64,
+    pub taker_fee_bps: f64,
+}
+
+impl PaperSimConfig {
+    pub fn from_config(config: &Config) -> Self {
+        Self {
+            start_bankroll_usdc: config.execution.paper_start_bankroll_usdc,
+            kelly_fraction: config.strategy.kelly_fraction,
+            min_order_usdc: config.execution.min_order_usdc,
+            max_order_usdc: config.execution.max_order_usdc,
+            default_order_usdc: config.execution.default_order_usdc,
+            slippage_bps: config.execution.paper_slippage_bps,
+            latency_ms: config.execution.paper_latency_ms,
+            taker_fee_bps: config.fees.taker_fee_bps,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaperIntent {
@@ -39,6 +71,20 @@ pub struct PaperIntent {
     pub start_time_ms: u64,
     pub end_time_ms: u64,
     pub emitted_at_ms: u64,
+    #[serde(default)]
+    pub entry_price: Option<f64>,
+    #[serde(default)]
+    pub size: Option<f64>,
+    #[serde(default)]
+    pub notional_usdc: Option<f64>,
+    #[serde(default)]
+    pub fee_bps: Option<f64>,
+    #[serde(default)]
+    pub filled: bool,
+    #[serde(default)]
+    pub fill_reason: Option<String>,
+    #[serde(default)]
+    pub orderbook_age_ms: Option<u64>,
 }
 
 pub fn spawn_no_money_tracker(config: Arc<ArcSwap<Config>>, redis: RedisManager) -> JoinHandle<()> {
@@ -49,7 +95,11 @@ pub fn spawn_no_money_tracker(config: Arc<ArcSwap<Config>>, redis: RedisManager)
     })
 }
 
-pub async fn record_no_money_intent(redis: &RedisManager, intent: &TradeIntent) -> Result<()> {
+pub async fn record_no_money_intent(
+    redis: &RedisManager,
+    intent: &TradeIntent,
+    sim: &PaperSimConfig,
+) -> Result<()> {
     let window = intent.market_window.ok_or_else(|| {
         BankaiError::InvalidArgument("paper intent missing market window".to_string())
     })?;
@@ -62,6 +112,10 @@ pub async fn record_no_money_intent(redis: &RedisManager, intent: &TradeIntent) 
     if redis.get_string(&id).await?.is_some() {
         return Ok(());
     }
+    let orderbook = OrderBookStore::new(redis.clone());
+    let now = now_ms()?;
+    let (entry_price, size, notional_usdc, fee_bps, filled, fill_reason, orderbook_age_ms) =
+        simulate_entry(redis, &orderbook, intent, sim, now).await?;
     let record = PaperIntent {
         id: id.clone(),
         asset,
@@ -76,6 +130,13 @@ pub async fn record_no_money_intent(redis: &RedisManager, intent: &TradeIntent) 
         start_time_ms: window.start_time_ms,
         end_time_ms: window.end_time_ms,
         emitted_at_ms: intent.timestamp_ms,
+        entry_price,
+        size,
+        notional_usdc,
+        fee_bps,
+        filled,
+        fill_reason,
+        orderbook_age_ms,
     };
     let payload = serde_json::to_string(&record)?;
     redis.set_string(&id, &payload).await?;
@@ -99,6 +160,7 @@ async fn run_tracker(config: Arc<ArcSwap<Config>>, redis: RedisManager) -> Resul
             if !cfg.execution.paper_stats_persist {
                 reset_paper_state(&redis).await?;
             }
+            ensure_paper_bankroll(&redis, &cfg).await?;
             reset_done = true;
         }
 
@@ -138,12 +200,49 @@ async fn run_tracker(config: Arc<ArcSwap<Config>>, redis: RedisManager) -> Resul
                 continue;
             }
 
+            if !record.filled {
+                let _ = redis.incr_float(PAPER_STATS_MISSED, 1.0).await;
+                let reason = record
+                    .fill_reason
+                    .clone()
+                    .unwrap_or_else(|| "unfilled".to_string());
+                let message = format!(
+                    "[PAPER] asset={} market={} skipped reason={} orderbook_age_ms={:?}",
+                    record.asset, record.market_id, reason, record.orderbook_age_ms
+                );
+                let _ = redis.push_activity_log(&message, PAPER_LOG_LIMIT).await;
+                let _ = redis.zrem(PAPER_ZSET_KEY, &key).await;
+                let _ = redis.del(&key).await;
+                continue;
+            }
+
             let actual = if end_price >= start_price {
                 "UP"
             } else {
                 "DOWN"
             };
             let correct = record.predicted == actual;
+
+            let entry_price = record.entry_price.unwrap_or(record.implied_prob);
+            let size = record.size.unwrap_or(0.0);
+            let notional = record.notional_usdc.unwrap_or(entry_price * size);
+            let fee_bps = record.fee_bps.unwrap_or(0.0);
+            let fees_paid = if fee_bps > 0.0 {
+                notional * (fee_bps / 10_000.0)
+            } else {
+                0.0
+            };
+            let pnl = if correct {
+                (size * (1.0 - entry_price)) - fees_paid
+            } else {
+                -notional - fees_paid
+            };
+            let bankroll = redis
+                .get_float(PAPER_BANKROLL_KEY)
+                .await?
+                .unwrap_or(cfg.execution.paper_start_bankroll_usdc);
+            let new_bankroll = (bankroll + pnl).max(0.0);
+            let _ = redis.set_float(PAPER_BANKROLL_KEY, new_bankroll).await;
 
             if correct {
                 let _ = redis.incr_float(PAPER_STATS_WINS, 1.0).await;
@@ -163,13 +262,15 @@ async fn run_tracker(config: Arc<ArcSwap<Config>>, redis: RedisManager) -> Resul
             let _ = redis.set_float(PAPER_STATS_ACCURACY, accuracy).await;
 
             let message = format!(
-                "[PAPER] asset={} market={} predicted={} actual={} start={:.4} end={:.4} ok={} accuracy={:.2}%",
+                "[PAPER] asset={} market={} predicted={} actual={} entry={:.4} size={:.2} pnl={:.4} bankroll={:.4} ok={} accuracy={:.2}%",
                 record.asset,
                 record.market_id,
                 record.predicted,
                 actual,
-                start_price,
-                end_price,
+                entry_price,
+                size,
+                pnl,
+                new_bankroll,
                 correct,
                 accuracy
             );
@@ -191,7 +292,151 @@ async fn reset_paper_state(redis: &RedisManager) -> Result<()> {
     let _ = redis.del(PAPER_STATS_LOSSES).await;
     let _ = redis.del(PAPER_STATS_TOTAL).await;
     let _ = redis.del(PAPER_STATS_ACCURACY).await;
+    let _ = redis.del(PAPER_STATS_MISSED).await;
+    let _ = redis.del(PAPER_BANKROLL_KEY).await;
+    let _ = redis.del(PAPER_BANKROLL_START_KEY).await;
     Ok(())
+}
+
+async fn ensure_paper_bankroll(redis: &RedisManager, cfg: &Config) -> Result<()> {
+    let start = cfg.execution.paper_start_bankroll_usdc.max(0.0);
+    let current = redis.get_float(PAPER_BANKROLL_KEY).await?;
+    if current.is_none() {
+        let _ = redis.set_float(PAPER_BANKROLL_KEY, start).await;
+    }
+    let stored_start = redis.get_float(PAPER_BANKROLL_START_KEY).await?;
+    if stored_start.is_none() {
+        let _ = redis.set_float(PAPER_BANKROLL_START_KEY, start).await;
+    }
+    Ok(())
+}
+
+async fn simulate_entry(
+    redis: &RedisManager,
+    orderbook: &OrderBookStore,
+    intent: &TradeIntent,
+    sim: &PaperSimConfig,
+    now_ms: u64,
+) -> Result<(
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+    bool,
+    Option<String>,
+    Option<u64>,
+)> {
+    let price = intent.implied_prob;
+    if !(0.0..=1.0).contains(&price) || price == 0.0 {
+        return Ok((
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("invalid_price".to_string()),
+            None,
+        ));
+    }
+    let bankroll = redis
+        .get_float(PAPER_BANKROLL_KEY)
+        .await?
+        .unwrap_or(sim.start_bankroll_usdc);
+    let odds = 1.0 / price;
+    let kelly = calculate_kelly(intent.true_prob, odds);
+    let target = if kelly > 0.0 {
+        bankroll * sim.kelly_fraction * kelly
+    } else {
+        sim.default_order_usdc
+    };
+    let notional = target.clamp(sim.min_order_usdc, sim.max_order_usdc);
+    if notional < sim.min_order_usdc {
+        return Ok((
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("min_order".to_string()),
+            None,
+        ));
+    }
+    let size = notional / price;
+
+    let last_update = orderbook.last_update_ms(&intent.asset_id).await?;
+    let orderbook_age = last_update.map(|ts| now_ms.saturating_sub(ts));
+    if sim.latency_ms > 0 {
+        if last_update.is_none() || orderbook_age.unwrap_or(u64::MAX) > sim.latency_ms {
+            return Ok((
+                None,
+                Some(size),
+                Some(notional),
+                None,
+                false,
+                Some("latency".to_string()),
+                orderbook_age,
+            ));
+        }
+    }
+
+    let side = match intent.side {
+        TradeSide::Buy => BookSide::Ask,
+        TradeSide::Sell => BookSide::Bid,
+    };
+    let vwap = orderbook
+        .vwap_for_size(&intent.asset_id, side, size, PAPER_VWAP_LEVELS)
+        .await?;
+    let Some(vwap) = vwap else {
+        return Ok((
+            None,
+            Some(size),
+            Some(notional),
+            None,
+            false,
+            Some("depth".to_string()),
+            orderbook_age,
+        ));
+    };
+    let mut entry_price = vwap.avg_price;
+    if sim.slippage_bps > 0.0 {
+        let slip = sim.slippage_bps / 10_000.0;
+        entry_price = match intent.side {
+            TradeSide::Buy => entry_price * (1.0 + slip),
+            TradeSide::Sell => entry_price * (1.0 - slip),
+        };
+    }
+    let notional_adj = size * entry_price;
+    let fee_bps = if intent.mode == TradeMode::Snipe {
+        redis
+            .get_fee_rate_bps(&intent.asset_id)
+            .await?
+            .unwrap_or(sim.taker_fee_bps)
+    } else {
+        0.0
+    };
+
+    Ok((
+        Some(entry_price),
+        Some(size),
+        Some(notional_adj),
+        Some(fee_bps),
+        true,
+        None,
+        orderbook_age,
+    ))
+}
+
+fn calculate_kelly(win_prob: f64, odds: f64) -> f64 {
+    if win_prob <= 0.0 || win_prob >= 1.0 {
+        return 0.0;
+    }
+    if odds <= 1.0 {
+        return 0.0;
+    }
+    let payout = odds - 1.0;
+    let loss_prob = 1.0 - win_prob;
+    let kelly = (win_prob * payout - loss_prob) / payout;
+    kelly.clamp(0.0, 1.0)
 }
 
 async fn resolve_asset_for_market(redis: &RedisManager, market_id: &str) -> Result<String> {

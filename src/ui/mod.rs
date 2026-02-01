@@ -53,6 +53,9 @@ const PAPER_STATS_WINS_KEY: &str = "paper:stats:wins";
 const PAPER_STATS_LOSSES_KEY: &str = "paper:stats:losses";
 const PAPER_STATS_TOTAL_KEY: &str = "paper:stats:total";
 const PAPER_STATS_ACCURACY_KEY: &str = "paper:stats:accuracy_pct";
+const PAPER_STATS_MISSED_KEY: &str = "paper:stats:missed";
+const PAPER_BANKROLL_KEY: &str = "paper:bankroll:usdc";
+const PAPER_BANKROLL_START_KEY: &str = "paper:bankroll:start_usdc";
 
 type UiResult<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -108,6 +111,11 @@ pub struct PaperStatsData {
     pub losses: f64,
     pub total: f64,
     pub accuracy_pct: f64,
+    pub missed: f64,
+    pub bankroll_usdc: f64,
+    pub roi_pct: f64,
+    pub win_rate_ci_low: f64,
+    pub win_rate_ci_high: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -469,11 +477,37 @@ async fn snapshot_loop(
                             .await
                             .unwrap_or(None)
                             .unwrap_or(0.0);
+                        let missed = redis
+                            .get_float(PAPER_STATS_MISSED_KEY)
+                            .await
+                            .unwrap_or(None)
+                            .unwrap_or(0.0);
+                        let bankroll = redis
+                            .get_float(PAPER_BANKROLL_KEY)
+                            .await
+                            .unwrap_or(None)
+                            .unwrap_or(0.0);
+                        let start = redis
+                            .get_float(PAPER_BANKROLL_START_KEY)
+                            .await
+                            .unwrap_or(None)
+                            .unwrap_or(0.0);
+                        let roi_pct = if start > 0.0 {
+                            ((bankroll - start) / start) * 100.0
+                        } else {
+                            0.0
+                        };
+                        let (ci_low, ci_high) = win_rate_confidence_interval(wins, losses);
                         paper_stats = Some(PaperStatsData {
                             wins,
                             losses,
                             total,
                             accuracy_pct: accuracy,
+                            missed,
+                            bankroll_usdc: bankroll,
+                            roi_pct,
+                            win_rate_ci_low: ci_low,
+                            win_rate_ci_high: ci_high,
                         });
                     } else {
                         paper_stats = None;
@@ -1012,6 +1046,22 @@ fn allora_online_window(config: &Config) -> Duration {
 
 fn chainlink_online_window(_config: &Config) -> Duration {
     Duration::from_secs(10)
+}
+
+fn win_rate_confidence_interval(wins: f64, losses: f64) -> (f64, f64) {
+    let n = wins + losses;
+    if n <= 0.0 {
+        return (0.0, 0.0);
+    }
+    let p = wins / n;
+    let z = 1.96;
+    let z2 = z * z;
+    let denom = 1.0 + z2 / n;
+    let center = (p + z2 / (2.0 * n)) / denom;
+    let margin = (z / denom) * ((p * (1.0 - p) / n + z2 / (4.0 * n * n)).max(0.0)).sqrt();
+    let low = (center - margin).clamp(0.0, 1.0);
+    let high = (center + margin).clamp(0.0, 1.0);
+    (low * 100.0, high * 100.0)
 }
 
 fn ui_loop(receiver: mpsc::Receiver<UiCommand>, config: TuiConfig) -> UiResult<()> {

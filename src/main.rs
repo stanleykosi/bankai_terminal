@@ -12,6 +12,7 @@
 use arc_swap::ArcSwap;
 use bankai_terminal::accounting::bankroll_refresh::BankrollRefresher;
 use bankai_terminal::accounting::no_money::spawn_no_money_tracker;
+use bankai_terminal::accounting::no_money::PaperSimConfig;
 use bankai_terminal::accounting::open_orders_refresh::OpenOrdersRefresher;
 /**
  * @purpose
@@ -516,6 +517,7 @@ async fn spawn_execution_pipeline(
         Some(redis),
         wallet_key,
         Arc::new(builder),
+        Some(PaperSimConfig::from_config(&config)),
     )?;
     let _exec_handle = orchestrator.spawn(intent_rx);
 
