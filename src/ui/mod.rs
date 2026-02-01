@@ -54,6 +54,7 @@ const PAPER_STATS_LOSSES_KEY: &str = "paper:stats:losses";
 const PAPER_STATS_TOTAL_KEY: &str = "paper:stats:total";
 const PAPER_STATS_ACCURACY_KEY: &str = "paper:stats:accuracy_pct";
 const PAPER_STATS_MISSED_KEY: &str = "paper:stats:missed";
+const PAPER_STATS_MISSED_REASON_KEY: &str = "paper:stats:missed_reason";
 const PAPER_BANKROLL_KEY: &str = "paper:bankroll:usdc";
 const PAPER_BANKROLL_START_KEY: &str = "paper:bankroll:start_usdc";
 
@@ -112,6 +113,7 @@ pub struct PaperStatsData {
     pub total: f64,
     pub accuracy_pct: f64,
     pub missed: f64,
+    pub missed_reason: Option<String>,
     pub bankroll_usdc: f64,
     pub roi_pct: f64,
     pub win_rate_ci_low: f64,
@@ -482,6 +484,10 @@ async fn snapshot_loop(
                             .await
                             .unwrap_or(None)
                             .unwrap_or(0.0);
+                        let missed_reason = redis
+                            .get_string(PAPER_STATS_MISSED_REASON_KEY)
+                            .await
+                            .unwrap_or(None);
                         let bankroll = redis
                             .get_float(PAPER_BANKROLL_KEY)
                             .await
@@ -504,6 +510,7 @@ async fn snapshot_loop(
                             total,
                             accuracy_pct: accuracy,
                             missed,
+                            missed_reason,
                             bankroll_usdc: bankroll,
                             roi_pct,
                             win_rate_ci_low: ci_low,

@@ -17,6 +17,8 @@ use crate::error::{BankaiError, Result};
 use crate::storage::orderbook::{BookSide, OrderBookStore};
 use crate::storage::redis::{MarketMetadata, RedisManager};
 use arc_swap::ArcSwap;
+use chrono::{TimeZone, Utc};
+use chrono_tz::America::New_York;
 
 const PAPER_ZSET_KEY: &str = "paper:intents";
 const PAPER_STATS_WINS: &str = "paper:stats:wins";
@@ -24,6 +26,7 @@ const PAPER_STATS_LOSSES: &str = "paper:stats:losses";
 const PAPER_STATS_TOTAL: &str = "paper:stats:total";
 const PAPER_STATS_ACCURACY: &str = "paper:stats:accuracy_pct";
 const PAPER_STATS_MISSED: &str = "paper:stats:missed";
+const PAPER_STATS_MISSED_REASON: &str = "paper:stats:missed_reason";
 const PAPER_BANKROLL_KEY: &str = "paper:bankroll:usdc";
 const PAPER_BANKROLL_START_KEY: &str = "paper:bankroll:start_usdc";
 const PAPER_LOG_LIMIT: usize = 200;
@@ -206,6 +209,19 @@ async fn run_tracker(config: Arc<ArcSwap<Config>>, redis: RedisManager) -> Resul
                     .fill_reason
                     .clone()
                     .unwrap_or_else(|| "unfilled".to_string());
+                let start_et = Utc
+                    .timestamp_millis_opt(record.start_time_ms as i64)
+                    .single()
+                    .map(|dt| {
+                        dt.with_timezone(&New_York)
+                            .format("%b %d %I:%M%p")
+                            .to_string()
+                    })
+                    .unwrap_or_else(|| record.start_time_ms.to_string());
+                let latest_reason = format!("{} {} ({})", record.asset, start_et, reason);
+                let _ = redis
+                    .set_string(PAPER_STATS_MISSED_REASON, &latest_reason)
+                    .await;
                 let message = format!(
                     "[PAPER] asset={} market={} skipped reason={} orderbook_age_ms={:?}",
                     record.asset, record.market_id, reason, record.orderbook_age_ms
@@ -293,6 +309,7 @@ async fn reset_paper_state(redis: &RedisManager) -> Result<()> {
     let _ = redis.del(PAPER_STATS_TOTAL).await;
     let _ = redis.del(PAPER_STATS_ACCURACY).await;
     let _ = redis.del(PAPER_STATS_MISSED).await;
+    let _ = redis.del(PAPER_STATS_MISSED_REASON).await;
     let _ = redis.del(PAPER_BANKROLL_KEY).await;
     let _ = redis.del(PAPER_BANKROLL_START_KEY).await;
     Ok(())

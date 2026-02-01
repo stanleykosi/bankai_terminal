@@ -109,10 +109,13 @@ fn render_paper_stats(frame: &mut Frame, area: Rect, stats: Option<&PaperStatsDa
             "Loss: {:.0} | Missed: {:.0} | Total: {:.0}",
             stats.losses, stats.missed, stats.total
         )));
+        let reason = stats.missed_reason.as_deref().unwrap_or("--");
+        lines.push(Line::from(format!("Last Miss: {reason}")));
     } else {
         lines.push(Line::from("Acc: -- | CI95: --"));
         lines.push(Line::from("Bank: -- | Wins: --"));
         lines.push(Line::from("Loss: -- | Missed: -- | Total: --"));
+        lines.push(Line::from("Last Miss: --"));
     }
     let paragraph = Paragraph::new(lines)
         .block(block)
