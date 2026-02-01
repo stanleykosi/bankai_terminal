@@ -96,7 +96,9 @@ async fn run_tracker(config: Arc<ArcSwap<Config>>, redis: RedisManager) -> Resul
             continue;
         }
         if !reset_done {
-            reset_paper_state(&redis).await?;
+            if !cfg.execution.paper_stats_persist {
+                reset_paper_state(&redis).await?;
+            }
             reset_done = true;
         }
 

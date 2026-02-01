@@ -24,6 +24,7 @@ use crate::storage::redis::{AssetWindow, RedisManager};
 
 const TOPIC: &str = "crypto_prices_chainlink";
 const DEFAULT_PING_INTERVAL: Duration = Duration::from_secs(5);
+const DEFAULT_PRICE_STALE_TIMEOUT: Duration = Duration::from_secs(30);
 const ACTIVITY_LOG_LIMIT: usize = 200;
 
 fn compute_jitter(max_ms: u64) -> Result<Duration> {
@@ -84,6 +85,7 @@ impl ChainlinkOracle {
         let mut ping_interval = tokio::time::interval(DEFAULT_PING_INTERVAL);
         let mut backoff = ReconnectBackoff::new();
         let idle_timeout = Duration::from_secs(30);
+        let price_stale_timeout = DEFAULT_PRICE_STALE_TIMEOUT;
 
         loop {
             let endpoint = self.config.endpoint.clone();
@@ -141,7 +143,9 @@ impl ChainlinkOracle {
                     .await;
             }
 
-            let mut last_msg_ms = now_ms().unwrap_or(0);
+            let now = now_ms().unwrap_or(0);
+            let mut last_msg_ms = now;
+            let mut last_price_ms = now;
             loop {
                 tokio::select! {
                     _ = window_refresh.tick() => {
@@ -161,6 +165,18 @@ impl ChainlinkOracle {
                                 let _ = redis
                                     .push_activity_log(
                                         "[CHAINLINK] idle timeout; reconnecting",
+                                        ACTIVITY_LOG_LIMIT,
+                                    )
+                                    .await;
+                            }
+                            break;
+                        }
+                        if now_ms().unwrap_or(0).saturating_sub(last_price_ms) > price_stale_timeout.as_millis() as u64 {
+                            tracing::warn!(endpoint = %endpoint, "chainlink price stale; reconnecting");
+                            if let Some(redis) = self.config.redis.as_ref() {
+                                let _ = redis
+                                    .push_activity_log(
+                                        "[CHAINLINK] price stale; reconnecting",
                                         ACTIVITY_LOG_LIMIT,
                                     )
                                     .await;
@@ -194,6 +210,7 @@ impl ChainlinkOracle {
                                     }
                                 };
                                 if let Some(mut event) = event {
+                                    last_price_ms = now_ms().unwrap_or(0);
                                     if event.event_time_ms == 0 {
                                         event.event_time_ms = now_ms().unwrap_or(0);
                                     }

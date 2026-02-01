@@ -151,6 +151,8 @@ pub struct ExecutionConfig {
     pub bankroll_refresh_secs: u64,
     #[serde(default = "default_execution_no_money_mode")]
     pub no_money_mode: bool,
+    #[serde(default = "default_execution_paper_stats_persist")]
+    pub paper_stats_persist: bool,
     #[serde(default = "default_execution_signal_alignment_max_secs")]
     pub signal_alignment_max_secs: u64,
     #[serde(default = "default_execution_signal_alignment_max_secs_sol")]
@@ -197,6 +199,7 @@ impl Default for ExecutionConfig {
             idempotency_ttl_secs: default_execution_idempotency_ttl_secs(),
             bankroll_refresh_secs: default_execution_bankroll_refresh_secs(),
             no_money_mode: default_execution_no_money_mode(),
+            paper_stats_persist: default_execution_paper_stats_persist(),
             signal_alignment_max_secs: default_execution_signal_alignment_max_secs(),
             signal_alignment_max_secs_sol: default_execution_signal_alignment_max_secs_sol(),
             take_profit_bps: default_execution_take_profit_bps(),
@@ -444,6 +447,10 @@ fn default_execution_bankroll_refresh_secs() -> u64 {
 }
 
 fn default_execution_no_money_mode() -> bool {
+    false
+}
+
+fn default_execution_paper_stats_persist() -> bool {
     false
 }
 
