@@ -283,6 +283,8 @@ async fn spawn_polymarket_oracles(config: &Arc<Config>) -> Result<()> {
     rtds_config.ping_interval = Duration::from_secs(config.polymarket.ping_interval_secs);
     rtds_config.asset_refresh_interval =
         Duration::from_secs(config.polymarket.asset_refresh_interval_secs);
+    rtds_config.asset_stale_timeout =
+        Duration::from_secs(config.polymarket.asset_stale_timeout_secs);
     rtds_config.reconnect_delay = Duration::from_secs(config.polymarket.reconnect_delay_secs);
     rtds_config.snapshot_timeout = Duration::from_millis(config.polymarket.snapshot_timeout_ms);
 

@@ -40,6 +40,7 @@ pub struct PolymarketRtdsConfig {
     pub rest_endpoint: String,
     pub asset_ids: Vec<String>,
     pub asset_refresh_interval: Duration,
+    pub asset_stale_timeout: Duration,
     pub ping_interval: Duration,
     pub reconnect_delay: Duration,
     pub snapshot_timeout: Duration,
@@ -53,6 +54,7 @@ impl PolymarketRtdsConfig {
             rest_endpoint,
             asset_ids,
             asset_refresh_interval: Duration::from_secs(5),
+            asset_stale_timeout: DEFAULT_ASSET_STALE_TIMEOUT,
             ping_interval: DEFAULT_PING_INTERVAL,
             reconnect_delay: DEFAULT_RECONNECT_DELAY,
             snapshot_timeout: DEFAULT_SNAPSHOT_TIMEOUT,
@@ -164,7 +166,7 @@ impl PolymarketRtds {
         let mut ping_interval = tokio::time::interval(self.config.ping_interval);
         let mut refresh_interval = tokio::time::interval(self.config.asset_refresh_interval);
         let stale_timeout = DEFAULT_STALE_TIMEOUT;
-        let asset_stale_timeout = DEFAULT_ASSET_STALE_TIMEOUT;
+        let asset_stale_timeout = self.config.asset_stale_timeout;
         let mut last_event = tokio::time::Instant::now();
         let mut current_assets = asset_ids.to_vec();
         loop {

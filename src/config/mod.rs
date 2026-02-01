@@ -225,6 +225,8 @@ pub struct PolymarketConfig {
     pub asset_ids: Vec<String>,
     #[serde(default = "default_polymarket_asset_refresh_interval_secs")]
     pub asset_refresh_interval_secs: u64,
+    #[serde(default = "default_polymarket_asset_stale_timeout_secs")]
+    pub asset_stale_timeout_secs: u64,
     #[serde(default = "default_polymarket_ping_interval_secs")]
     pub ping_interval_secs: u64,
     #[serde(default = "default_polymarket_reconnect_delay_secs")]
@@ -238,6 +240,7 @@ impl Default for PolymarketConfig {
         Self {
             asset_ids: Vec::new(),
             asset_refresh_interval_secs: default_polymarket_asset_refresh_interval_secs(),
+            asset_stale_timeout_secs: default_polymarket_asset_stale_timeout_secs(),
             ping_interval_secs: default_polymarket_ping_interval_secs(),
             reconnect_delay_secs: default_polymarket_reconnect_delay_secs(),
             snapshot_timeout_ms: default_polymarket_snapshot_timeout_ms(),
@@ -333,6 +336,10 @@ fn default_polymarket_ping_interval_secs() -> u64 {
 
 fn default_polymarket_asset_refresh_interval_secs() -> u64 {
     5
+}
+
+fn default_polymarket_asset_stale_timeout_secs() -> u64 {
+    20
 }
 
 fn default_polymarket_reconnect_delay_secs() -> u64 {

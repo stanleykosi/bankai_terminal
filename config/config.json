@@ -54,7 +54,7 @@
     "no_money_mode": true,
     "paper_stats_persist": true,
     "paper_start_bankroll_usdc": 50.0,
-    "paper_latency_ms": 1000,
+    "paper_latency_ms": 6000,
     "paper_slippage_bps": 5.0,
     "signal_alignment_max_secs": 350,
     "signal_alignment_max_secs_sol": 210,
@@ -66,6 +66,7 @@
   "polymarket": {
     "asset_ids": [],
     "asset_refresh_interval_secs": 5,
+    "asset_stale_timeout_secs": 5,
     "ping_interval_secs": 10,
     "reconnect_delay_secs": 3,
     "snapshot_timeout_ms": 10000
