@@ -273,25 +273,7 @@ impl PolymarketDiscovery {
         if !self.logged_markets.insert(market_id.to_string()) {
             return;
         }
-        let prefix = log_prefix();
-        let window_label = format_window_et(window);
-        let message = format!(
-            "{prefix} Market accepted {} id={} window={}",
-            asset.as_str(),
-            market_id,
-            window_label
-        );
-        let _ = self
-            .redis
-            .push_activity_log(&message, ACTIVITY_LOG_LIMIT)
-            .await;
-        if !label.is_empty() && label.len() < 120 {
-            let detail = format!("{prefix}  -> {label}");
-            let _ = self
-                .redis
-                .push_activity_log(&detail, ACTIVITY_LOG_LIMIT)
-                .await;
-        }
+        let _ = (asset, window, label, market_id);
     }
 
     async fn log_refresh_summary(
@@ -327,15 +309,6 @@ impl PolymarketDiscovery {
             let (active, first_upcoming, second_upcoming) = pick_asset_windows(now_ms, &windows);
             let candidate = active.clone().or(first_upcoming.clone());
             let Some(candidate) = candidate else {
-                let prefix = log_prefix();
-                let message = format!(
-                    "{prefix} Window select {} none (no active/upcoming in fetch)",
-                    asset.as_str()
-                );
-                let _ = self
-                    .redis
-                    .push_activity_log(&message, ACTIVITY_LOG_LIMIT)
-                    .await;
                 continue;
             };
             let window = candidate.window;
@@ -388,25 +361,7 @@ impl PolymarketDiscovery {
                 .unwrap_or(true);
             if changed {
                 self.last_asset_windows.insert(asset, window);
-                let prefix = log_prefix();
-                let window_label = format_window_et(&window);
-                let message = format!(
-                    "{prefix} Window set {} id={} window={}",
-                    asset.as_str(),
-                    market_id,
-                    window_label
-                );
-                let _ = self
-                    .redis
-                    .push_activity_log(&message, ACTIVITY_LOG_LIMIT)
-                    .await;
-                if !label.is_empty() && label.len() < 120 {
-                    let detail = format!("{prefix}  -> {label}");
-                    let _ = self
-                        .redis
-                        .push_activity_log(&detail, ACTIVITY_LOG_LIMIT)
-                        .await;
-                }
+                let _ = (market_id, label);
             }
         }
     }
@@ -1005,25 +960,6 @@ fn log_prefix() -> String {
     let now = Utc::now();
     let et = now.with_timezone(&New_York);
     format!("[{}]", et.format("%H:%M:%S"))
-}
-
-fn format_window_et(window: &MarketTimeWindow) -> String {
-    let start = Utc
-        .timestamp_millis_opt(window.start_time_ms as i64)
-        .single();
-    let end = Utc.timestamp_millis_opt(window.end_time_ms as i64).single();
-    match (start, end) {
-        (Some(start), Some(end)) => {
-            let start_et = start.with_timezone(&New_York);
-            let end_et = end.with_timezone(&New_York);
-            format!(
-                "{}-{} ET",
-                start_et.format("%b %d %I:%M%p"),
-                end_et.format("%I:%M%p")
-            )
-        }
-        _ => "unknown".to_string(),
-    }
 }
 
 fn pick_asset_windows(

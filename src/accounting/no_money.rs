@@ -31,6 +31,7 @@ const PAPER_BANKROLL_KEY: &str = "paper:bankroll:usdc";
 const PAPER_BANKROLL_START_KEY: &str = "paper:bankroll:start_usdc";
 const PAPER_LOG_LIMIT: usize = 200;
 const PAPER_VWAP_LEVELS: usize = 50;
+const PAPER_SETTLE_GRACE_MS: u64 = 120_000;
 
 #[derive(Debug, Clone)]
 pub struct PaperSimConfig {
@@ -191,42 +192,68 @@ async fn run_tracker(config: Arc<ArcSwap<Config>>, redis: RedisManager) -> Resul
 
             let Some((start_ms, start_price)) = redis.get_asset_start_price(&record.asset).await?
             else {
+                if now.saturating_sub(record.end_time_ms) > PAPER_SETTLE_GRACE_MS {
+                    record_missed(
+                        &redis,
+                        &record,
+                        "start_price_missing",
+                        "start price missing after grace",
+                    )
+                    .await;
+                    let _ = redis.zrem(PAPER_ZSET_KEY, &key).await;
+                    let _ = redis.del(&key).await;
+                }
                 continue;
             };
             if start_ms != record.start_time_ms {
+                if now.saturating_sub(record.end_time_ms) > PAPER_SETTLE_GRACE_MS {
+                    record_missed(
+                        &redis,
+                        &record,
+                        "start_price_mismatch",
+                        "start price mismatch after grace",
+                    )
+                    .await;
+                    let _ = redis.zrem(PAPER_ZSET_KEY, &key).await;
+                    let _ = redis.del(&key).await;
+                }
                 continue;
             }
             let Some((end_ms, end_price)) = redis.get_asset_end_price(&record.asset).await? else {
+                if now.saturating_sub(record.end_time_ms) > PAPER_SETTLE_GRACE_MS {
+                    record_missed(
+                        &redis,
+                        &record,
+                        "end_price_missing",
+                        "end price missing after grace",
+                    )
+                    .await;
+                    let _ = redis.zrem(PAPER_ZSET_KEY, &key).await;
+                    let _ = redis.del(&key).await;
+                }
                 continue;
             };
             if end_ms != record.end_time_ms {
+                if now.saturating_sub(record.end_time_ms) > PAPER_SETTLE_GRACE_MS {
+                    record_missed(
+                        &redis,
+                        &record,
+                        "end_price_mismatch",
+                        "end price mismatch after grace",
+                    )
+                    .await;
+                    let _ = redis.zrem(PAPER_ZSET_KEY, &key).await;
+                    let _ = redis.del(&key).await;
+                }
                 continue;
             }
 
             if !record.filled {
-                let _ = redis.incr_float(PAPER_STATS_MISSED, 1.0).await;
                 let reason = record
                     .fill_reason
                     .clone()
                     .unwrap_or_else(|| "unfilled".to_string());
-                let start_et = Utc
-                    .timestamp_millis_opt(record.start_time_ms as i64)
-                    .single()
-                    .map(|dt| {
-                        dt.with_timezone(&New_York)
-                            .format("%b %d %I:%M%p")
-                            .to_string()
-                    })
-                    .unwrap_or_else(|| record.start_time_ms.to_string());
-                let latest_reason = format!("{} {} ({})", record.asset, start_et, reason);
-                let _ = redis
-                    .set_string(PAPER_STATS_MISSED_REASON, &latest_reason)
-                    .await;
-                let message = format!(
-                    "[PAPER] asset={} market={} skipped reason={} orderbook_age_ms={:?}",
-                    record.asset, record.market_id, reason, record.orderbook_age_ms
-                );
-                let _ = redis.push_activity_log(&message, PAPER_LOG_LIMIT).await;
+                record_missed(&redis, &record, &reason, "missed fill").await;
                 let _ = redis.zrem(PAPER_ZSET_KEY, &key).await;
                 let _ = redis.del(&key).await;
                 continue;
@@ -313,6 +340,28 @@ async fn reset_paper_state(redis: &RedisManager) -> Result<()> {
     let _ = redis.del(PAPER_BANKROLL_KEY).await;
     let _ = redis.del(PAPER_BANKROLL_START_KEY).await;
     Ok(())
+}
+
+async fn record_missed(redis: &RedisManager, record: &PaperIntent, reason: &str, detail: &str) {
+    let _ = redis.incr_float(PAPER_STATS_MISSED, 1.0).await;
+    let start_et = Utc
+        .timestamp_millis_opt(record.start_time_ms as i64)
+        .single()
+        .map(|dt| {
+            dt.with_timezone(&New_York)
+                .format("%b %d %I:%M%p")
+                .to_string()
+        })
+        .unwrap_or_else(|| record.start_time_ms.to_string());
+    let latest_reason = format!("{} {} ({})", record.asset, start_et, reason);
+    let _ = redis
+        .set_string(PAPER_STATS_MISSED_REASON, &latest_reason)
+        .await;
+    let message = format!(
+        "[PAPER] asset={} market={} skipped reason={} detail={} orderbook_age_ms={:?}",
+        record.asset, record.market_id, reason, detail, record.orderbook_age_ms
+    );
+    let _ = redis.push_activity_log(&message, PAPER_LOG_LIMIT).await;
 }
 
 async fn ensure_paper_bankroll(redis: &RedisManager, cfg: &Config) -> Result<()> {

@@ -637,11 +637,14 @@ fn parse_event(text: &str) -> Result<Option<ChainlinkEvent>> {
         if price <= 0.0 {
             return Ok(None);
         }
-        let event_time_ms = payload
+        let mut event_time_ms = payload
             .get("timestamp")
             .or_else(|| raw.get("timestamp"))
             .and_then(|value| value.as_u64())
             .unwrap_or(0);
+        if event_time_ms > 0 && event_time_ms < 1_000_000_000_000 {
+            event_time_ms = event_time_ms.saturating_mul(1_000);
+        }
         return Ok(Some(ChainlinkEvent {
             symbol: symbol.to_string(),
             price,

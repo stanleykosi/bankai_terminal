@@ -222,8 +222,14 @@ impl TradingEngine {
         ) else {
             let last = state.last_signal_miss_ms.get(asset).copied().unwrap_or(0);
             if now.saturating_sub(last) > 30_000 {
-                self.log_alert(asset, "no 5m signal found in window; skipping")
-                    .await;
+                self.log_blocker(
+                    state,
+                    asset,
+                    "signal_missing",
+                    "no 5m signal found in window; skipping",
+                    now,
+                )
+                .await;
                 state.last_signal_miss_ms.insert(asset.to_string(), now);
             }
             return Ok(());
@@ -243,8 +249,14 @@ impl TradingEngine {
         if now.saturating_sub(allora.signal_timestamp_ms) > horizon_ms {
             let last = state.last_signal_stale_ms.get(asset).copied().unwrap_or(0);
             if now.saturating_sub(last) > 30_000 {
-                self.log_alert(asset, "5m signal stale; skipping window")
-                    .await;
+                self.log_blocker(
+                    state,
+                    asset,
+                    "signal_stale",
+                    "5m signal stale; skipping window",
+                    now,
+                )
+                .await;
                 state.last_signal_stale_ms.insert(asset.to_string(), now);
             }
             return Ok(());
@@ -258,8 +270,14 @@ impl TradingEngine {
                 .copied()
                 .unwrap_or(0);
             if now.saturating_sub(last) > 30_000 {
-                self.log_alert(asset, "start price missing for active window")
-                    .await;
+                self.log_blocker(
+                    state,
+                    asset,
+                    "start_price_missing",
+                    "start price missing for active window",
+                    now,
+                )
+                .await;
                 state
                     .last_start_price_alert_ms
                     .insert(asset.to_string(), now);
@@ -273,8 +291,14 @@ impl TradingEngine {
                 .copied()
                 .unwrap_or(0);
             if now.saturating_sub(last) > 30_000 {
-                self.log_alert(asset, "start price mismatch for active window")
-                    .await;
+                self.log_blocker(
+                    state,
+                    asset,
+                    "start_price_mismatch",
+                    "start price mismatch for active window",
+                    now,
+                )
+                .await;
                 state
                     .last_start_price_alert_ms
                     .insert(asset.to_string(), now);
@@ -298,11 +322,24 @@ impl TradingEngine {
             let last_fee = state.last_fee_alert_ms.get(asset).copied().unwrap_or(0);
             if now.saturating_sub(last_fee) > 60_000 {
                 if up_fee_bps.is_none() {
-                    self.log_alert(asset, "missing fee rate for UP token").await;
+                    self.log_blocker(
+                        state,
+                        asset,
+                        "fee_missing_up",
+                        "missing fee rate for UP token",
+                        now,
+                    )
+                    .await;
                 }
                 if down_fee_bps.is_none() {
-                    self.log_alert(asset, "missing fee rate for DOWN token")
-                        .await;
+                    self.log_blocker(
+                        state,
+                        asset,
+                        "fee_missing_down",
+                        "missing fee rate for DOWN token",
+                        now,
+                    )
+                    .await;
                 }
                 state.last_fee_alert_ms.insert(asset.to_string(), now);
             }
