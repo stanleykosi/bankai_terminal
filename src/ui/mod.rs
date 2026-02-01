@@ -49,6 +49,8 @@ const POLYMARKET_STALE_MS: u64 = 120_000;
 const ORACLE_ONLINE_MULTIPLIER: u64 = 3;
 const SIGNAL_HORIZON_MS: u64 = 5 * 60 * 1_000;
 const SQRT_5: f64 = 2.236_067_977_5;
+const SIGNAL_DIR_UP: i8 = 1;
+const SIGNAL_DIR_DOWN: i8 = -1;
 const PAPER_STATS_WINS_KEY: &str = "paper:stats:wins";
 const PAPER_STATS_LOSSES_KEY: &str = "paper:stats:losses";
 const PAPER_STATS_TOTAL_KEY: &str = "paper:stats:total";
@@ -702,6 +704,16 @@ async fn estimate_vwap_price(
         .volatility_1m
         .unwrap_or(config.execution.min_volatility)
         .max(config.execution.min_volatility);
+    let signal_context = match (snapshot.start_price, snapshot.inference_5m, alignment) {
+        (Some(start_price), Some(predicted), Some(alignment)) => compute_signal_context(
+            start_price,
+            predicted,
+            volatility_1m,
+            config.execution.probability_scale,
+            alignment,
+        ),
+        _ => None,
+    };
     let true_up = match (snapshot.start_price, snapshot.inference_5m, alignment) {
         (Some(start_price), Some(predicted), Some(alignment)) => Some(compute_true_probability_5m(
             start_price,
@@ -909,13 +921,37 @@ fn build_market_row(
     };
     let true_down = true_up.map(|value| (1.0 - value).clamp(0.0, 1.0));
 
-    let decision_up = decide_edge(true_up, implied_up_mid, implied_up_vwap, snipe_floor_bps);
+    let decision_up = decide_edge(true_up, implied_up_mid, implied_up_vwap, snipe_floor_bps)
+        .and_then(|edge| {
+            if signal_allows_direction(
+                &config.execution,
+                signal_context.as_ref(),
+                SIGNAL_DIR_UP,
+                edge.edge_bps,
+            ) {
+                Some(edge)
+            } else {
+                None
+            }
+        });
     let decision_down = decide_edge(
         true_down,
         implied_down_mid,
         implied_down_vwap,
         snipe_floor_bps,
-    );
+    )
+    .and_then(|edge| {
+        if signal_allows_direction(
+            &config.execution,
+            signal_context.as_ref(),
+            SIGNAL_DIR_DOWN,
+            edge.edge_bps,
+        ) {
+            Some(edge)
+        } else {
+            None
+        }
+    });
 
     let (edge_bps, side, mode) = match (decision_up.clone(), decision_down.clone()) {
         (None, None) => (None, None, MarketMode::NoSignal),
@@ -1244,6 +1280,64 @@ fn alignment_horizon_ms(config: &Config, asset: &str) -> u64 {
     } else {
         SIGNAL_HORIZON_MS
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SignalContext {
+    direction: i8,
+    confidence: f64,
+    z_score: f64,
+}
+
+fn compute_signal_context(
+    current_price: f64,
+    predicted_price: f64,
+    volatility_1m: f64,
+    scale: f64,
+    alignment: f64,
+) -> Option<SignalContext> {
+    if current_price <= 0.0 {
+        return None;
+    }
+    let delta = (predicted_price - current_price) / current_price;
+    let volatility_5m = (volatility_1m * SQRT_5).max(1e-9);
+    let z = delta / volatility_5m;
+    let z_scaled = z * scale;
+    let confidence = z_scaled.abs().tanh() * alignment;
+    let direction = if z_scaled > 0.0 {
+        SIGNAL_DIR_UP
+    } else if z_scaled < 0.0 {
+        SIGNAL_DIR_DOWN
+    } else {
+        0
+    };
+    Some(SignalContext {
+        direction,
+        confidence: confidence.clamp(0.0, 1.0),
+        z_score: z_scaled,
+    })
+}
+
+fn signal_allows_direction(
+    execution: &ExecutionConfig,
+    signal: Option<&SignalContext>,
+    expected_direction: i8,
+    edge_bps: f64,
+) -> bool {
+    if !execution.signal_direction_gate {
+        return true;
+    }
+    let Some(signal) = signal else {
+        return false;
+    };
+    if signal.direction == 0 || signal.direction == expected_direction {
+        return true;
+    }
+    if execution.contrarian_min_edge_bps <= 0.0 {
+        return false;
+    }
+    edge_bps >= execution.contrarian_min_edge_bps
+        && signal.confidence >= execution.contrarian_confidence_min
 }
 
 fn compute_true_probability_5m(

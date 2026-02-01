@@ -109,6 +109,12 @@ pub struct ExecutionConfig {
     pub probability_scale: f64,
     #[serde(default = "default_execution_probability_max_offset")]
     pub probability_max_offset: f64,
+    #[serde(default = "default_execution_signal_direction_gate")]
+    pub signal_direction_gate: bool,
+    #[serde(default = "default_execution_contrarian_min_edge_bps")]
+    pub contrarian_min_edge_bps: f64,
+    #[serde(default = "default_execution_contrarian_confidence_min")]
+    pub contrarian_confidence_min: f64,
     #[serde(default = "default_execution_min_volatility")]
     pub min_volatility: f64,
     #[serde(default = "default_execution_staleness_max_ratio")]
@@ -184,6 +190,9 @@ impl Default for ExecutionConfig {
             max_impact_bps: default_execution_max_impact_bps(),
             probability_scale: default_execution_probability_scale(),
             probability_max_offset: default_execution_probability_max_offset(),
+            signal_direction_gate: default_execution_signal_direction_gate(),
+            contrarian_min_edge_bps: default_execution_contrarian_min_edge_bps(),
+            contrarian_confidence_min: default_execution_contrarian_confidence_min(),
             min_volatility: default_execution_min_volatility(),
             staleness_max_ratio: default_execution_staleness_max_ratio(),
             order_expiry_secs: default_execution_order_expiry_secs(),
@@ -380,6 +389,18 @@ fn default_execution_probability_scale() -> f64 {
 
 fn default_execution_probability_max_offset() -> f64 {
     0.35
+}
+
+fn default_execution_signal_direction_gate() -> bool {
+    false
+}
+
+fn default_execution_contrarian_min_edge_bps() -> f64 {
+    0.0
+}
+
+fn default_execution_contrarian_confidence_min() -> f64 {
+    0.7
 }
 
 fn default_execution_min_volatility() -> f64 {

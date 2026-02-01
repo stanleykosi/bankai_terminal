@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, mpsc};
 
-use crate::config::{Config, FeeConfig};
+use crate::config::{Config, ExecutionConfig, FeeConfig};
 use crate::engine::analysis::{analyze_opportunity, AnalysisInput, TradeDecision};
 use crate::engine::risk::RiskState;
 use crate::engine::types::{
@@ -34,6 +34,9 @@ const ACTIVITY_LOG_LIMIT: usize = 50;
 const DEFAULT_SIGNAL_HORIZON_MS: u64 = 5 * 60 * 1_000;
 const SQRT_5: f64 = 2.236_067_977_5;
 const ORDERBOOK_STALE_MS: u64 = 30_000;
+
+const SIGNAL_DIR_UP: i8 = 1;
+const SIGNAL_DIR_DOWN: i8 = -1;
 
 pub struct TradingEngine {
     config: Arc<ArcSwap<Config>>,
@@ -437,6 +440,13 @@ impl TradingEngine {
         };
         let implied_down = implied_down.unwrap_or_else(|| (1.0 - implied_up).max(0.0));
 
+        let signal_context = compute_signal_context(
+            start_price,
+            allora.inference_value,
+            volatility,
+            config.execution.probability_scale,
+            alignment,
+        );
         let true_up = compute_true_probability_5m(
             start_price,
             allora.inference_value,
@@ -462,52 +472,68 @@ impl TradingEngine {
             &up_fees,
         ) {
             if let Some(mut intent) = result.intent {
-                if up_fee_missing {
-                    match result.decision {
-                        TradeDecision::Snipe => {
-                            self.log_alert(asset, "fee rate missing; snipe intent blocked")
-                                .await;
+                if !signal_allows_direction(
+                    &config.execution,
+                    signal_context.as_ref(),
+                    SIGNAL_DIR_UP,
+                    result.edge_bps,
+                ) {
+                    self.log_blocker(
+                        state,
+                        asset,
+                        "signal_direction_block_up",
+                        "signal direction blocks UP intent",
+                        now,
+                    )
+                    .await;
+                } else {
+                    if up_fee_missing {
+                        match result.decision {
+                            TradeDecision::Snipe => {
+                                self.log_alert(asset, "fee rate missing; snipe intent blocked")
+                                    .await;
+                            }
+                            TradeDecision::Ladder => {
+                                self.log_alert(asset, "fee rate missing; ladder intent allowed")
+                                    .await;
+                            }
+                            _ => {}
                         }
-                        TradeDecision::Ladder => {
-                            self.log_alert(asset, "fee rate missing; ladder intent allowed")
-                                .await;
-                        }
-                        _ => {}
                     }
-                }
-                if !(up_fee_missing && result.decision == TradeDecision::Snipe) {
-                    if result.decision == TradeDecision::Snipe {
-                        if let Some(vwap) = estimate_snipe_vwap(
-                            &self.orderbook,
-                            &self.redis,
-                            &up_token,
-                            true_up,
-                            implied_up,
-                            &config,
-                        )
-                        .await?
-                        {
-                            if let Ok(vwap_result) = analyze_opportunity(
-                                AnalysisInput {
-                                    market_id: asset_window.market_id.clone(),
-                                    asset_id: up_token.clone(),
-                                    implied_prob: vwap,
-                                    true_prob: true_up,
-                                    timestamp_ms: now,
-                                    market_window: Some(window),
-                                },
-                                &config.strategy,
-                                &up_fees,
-                            ) {
-                                if vwap_result.decision == TradeDecision::Snipe {
-                                    if let Some(vwap_intent) = vwap_result.intent {
-                                        intent = vwap_intent;
+                    if !(up_fee_missing && result.decision == TradeDecision::Snipe) {
+                        if result.decision == TradeDecision::Snipe {
+                            if let Some(vwap) = estimate_snipe_vwap(
+                                &self.orderbook,
+                                &self.redis,
+                                &up_token,
+                                true_up,
+                                implied_up,
+                                &config,
+                            )
+                            .await?
+                            {
+                                if let Ok(vwap_result) = analyze_opportunity(
+                                    AnalysisInput {
+                                        market_id: asset_window.market_id.clone(),
+                                        asset_id: up_token.clone(),
+                                        implied_prob: vwap,
+                                        true_prob: true_up,
+                                        timestamp_ms: now,
+                                        market_window: Some(window),
+                                    },
+                                    &config.strategy,
+                                    &up_fees,
+                                ) {
+                                    if vwap_result.decision == TradeDecision::Snipe {
+                                        if let Some(vwap_intent) = vwap_result.intent {
+                                            intent = vwap_intent;
+                                        }
                                     }
                                 }
                             }
                         }
+                        best_intent = Some(intent);
                     }
-                    best_intent = Some(intent);
                 }
             }
         }
@@ -526,57 +552,73 @@ impl TradingEngine {
             &down_fees,
         ) {
             if let Some(mut intent) = result.intent {
-                if down_fee_missing {
-                    match result.decision {
-                        TradeDecision::Snipe => {
-                            self.log_alert(asset, "fee rate missing; snipe intent blocked")
-                                .await;
+                if !signal_allows_direction(
+                    &config.execution,
+                    signal_context.as_ref(),
+                    SIGNAL_DIR_DOWN,
+                    result.edge_bps,
+                ) {
+                    self.log_blocker(
+                        state,
+                        asset,
+                        "signal_direction_block_down",
+                        "signal direction blocks DOWN intent",
+                        now,
+                    )
+                    .await;
+                } else {
+                    if down_fee_missing {
+                        match result.decision {
+                            TradeDecision::Snipe => {
+                                self.log_alert(asset, "fee rate missing; snipe intent blocked")
+                                    .await;
+                            }
+                            TradeDecision::Ladder => {
+                                self.log_alert(asset, "fee rate missing; ladder intent allowed")
+                                    .await;
+                            }
+                            _ => {}
                         }
-                        TradeDecision::Ladder => {
-                            self.log_alert(asset, "fee rate missing; ladder intent allowed")
-                                .await;
-                        }
-                        _ => {}
                     }
-                }
-                if !(down_fee_missing && result.decision == TradeDecision::Snipe) {
-                    if result.decision == TradeDecision::Snipe {
-                        if let Some(vwap) = estimate_snipe_vwap(
-                            &self.orderbook,
-                            &self.redis,
-                            &down_token,
-                            true_down,
-                            implied_down,
-                            &config,
-                        )
-                        .await?
-                        {
-                            if let Ok(vwap_result) = analyze_opportunity(
-                                AnalysisInput {
-                                    market_id: asset_window.market_id.clone(),
-                                    asset_id: down_token.clone(),
-                                    implied_prob: vwap,
-                                    true_prob: true_down,
-                                    timestamp_ms: now,
-                                    market_window: Some(window),
-                                },
-                                &config.strategy,
-                                &down_fees,
-                            ) {
-                                if vwap_result.decision == TradeDecision::Snipe {
-                                    if let Some(vwap_intent) = vwap_result.intent {
-                                        intent = vwap_intent;
+                    if !(down_fee_missing && result.decision == TradeDecision::Snipe) {
+                        if result.decision == TradeDecision::Snipe {
+                            if let Some(vwap) = estimate_snipe_vwap(
+                                &self.orderbook,
+                                &self.redis,
+                                &down_token,
+                                true_down,
+                                implied_down,
+                                &config,
+                            )
+                            .await?
+                            {
+                                if let Ok(vwap_result) = analyze_opportunity(
+                                    AnalysisInput {
+                                        market_id: asset_window.market_id.clone(),
+                                        asset_id: down_token.clone(),
+                                        implied_prob: vwap,
+                                        true_prob: true_down,
+                                        timestamp_ms: now,
+                                        market_window: Some(window),
+                                    },
+                                    &config.strategy,
+                                    &down_fees,
+                                ) {
+                                    if vwap_result.decision == TradeDecision::Snipe {
+                                        if let Some(vwap_intent) = vwap_result.intent {
+                                            intent = vwap_intent;
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
-                    let replace = match best_intent.as_ref() {
-                        Some(current) => intent.edge_bps > current.edge_bps,
-                        None => true,
-                    };
-                    if replace {
-                        best_intent = Some(intent);
+                        let replace = match best_intent.as_ref() {
+                            Some(current) => intent.edge_bps > current.edge_bps,
+                            None => true,
+                        };
+                        if replace {
+                            best_intent = Some(intent);
+                        }
                     }
                 }
             }
@@ -850,6 +892,13 @@ struct AlignedSignal {
     carried_forward: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct SignalContext {
+    direction: i8,
+    confidence: f64,
+    z_score: f64,
+}
+
 fn select_aligned_5m_signal(
     updates: &HashMap<String, AlloraMarketUpdate>,
     asset: &str,
@@ -943,6 +992,57 @@ fn alignment_horizon_ms(config: &Config, asset: &str) -> u64 {
     } else {
         DEFAULT_SIGNAL_HORIZON_MS
     }
+}
+
+fn compute_signal_context(
+    current_price: f64,
+    predicted_price: f64,
+    volatility_1m: f64,
+    scale: f64,
+    alignment: f64,
+) -> Option<SignalContext> {
+    if current_price <= 0.0 {
+        return None;
+    }
+    let delta = (predicted_price - current_price) / current_price;
+    let volatility_5m = (volatility_1m * SQRT_5).max(1e-9);
+    let z = delta / volatility_5m;
+    let z_scaled = z * scale;
+    let confidence = z_scaled.abs().tanh() * alignment;
+    let direction = if z_scaled > 0.0 {
+        SIGNAL_DIR_UP
+    } else if z_scaled < 0.0 {
+        SIGNAL_DIR_DOWN
+    } else {
+        0
+    };
+    Some(SignalContext {
+        direction,
+        confidence: confidence.clamp(0.0, 1.0),
+        z_score: z_scaled,
+    })
+}
+
+fn signal_allows_direction(
+    execution: &ExecutionConfig,
+    signal: Option<&SignalContext>,
+    expected_direction: i8,
+    edge_bps: f64,
+) -> bool {
+    if !execution.signal_direction_gate {
+        return true;
+    }
+    let Some(signal) = signal else {
+        return false;
+    };
+    if signal.direction == 0 || signal.direction == expected_direction {
+        return true;
+    }
+    if execution.contrarian_min_edge_bps <= 0.0 {
+        return false;
+    }
+    edge_bps >= execution.contrarian_min_edge_bps
+        && signal.confidence >= execution.contrarian_confidence_min
 }
 
 fn compute_true_probability_5m(
@@ -1110,4 +1210,63 @@ fn log_prefix() -> String {
     let now = Utc::now();
     let et = now.with_timezone(&New_York);
     format!("[{}]", et.format("%H:%M:%S"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signal_direction_gate_allows_when_disabled() {
+        let mut execution = ExecutionConfig::default();
+        execution.signal_direction_gate = false;
+        let signal = SignalContext {
+            direction: SIGNAL_DIR_DOWN,
+            confidence: 0.9,
+            z_score: -1.2,
+        };
+        assert!(signal_allows_direction(
+            &execution,
+            Some(&signal),
+            SIGNAL_DIR_UP,
+            1500.0
+        ));
+    }
+
+    #[test]
+    fn signal_direction_gate_blocks_contrarian_without_override() {
+        let mut execution = ExecutionConfig::default();
+        execution.signal_direction_gate = true;
+        execution.contrarian_min_edge_bps = 0.0;
+        let signal = SignalContext {
+            direction: SIGNAL_DIR_DOWN,
+            confidence: 0.9,
+            z_score: -1.2,
+        };
+        assert!(!signal_allows_direction(
+            &execution,
+            Some(&signal),
+            SIGNAL_DIR_UP,
+            2000.0
+        ));
+    }
+
+    #[test]
+    fn signal_direction_gate_allows_contrarian_with_override() {
+        let mut execution = ExecutionConfig::default();
+        execution.signal_direction_gate = true;
+        execution.contrarian_min_edge_bps = 1500.0;
+        execution.contrarian_confidence_min = 0.7;
+        let signal = SignalContext {
+            direction: SIGNAL_DIR_DOWN,
+            confidence: 0.9,
+            z_score: -1.2,
+        };
+        assert!(signal_allows_direction(
+            &execution,
+            Some(&signal),
+            SIGNAL_DIR_UP,
+            2000.0
+        ));
+    }
 }
