@@ -14,7 +14,8 @@
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
 use serde_json::{json, Value};
-use std::time::Duration;
+use std::collections::HashSet;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::error::{BankaiError, Result};
@@ -23,6 +24,8 @@ use crate::storage::orderbook::{BookSide, OrderBookLevel, OrderBookStore};
 const DEFAULT_PING_INTERVAL: Duration = Duration::from_secs(10);
 const DEFAULT_RECONNECT_DELAY: Duration = Duration::from_secs(3);
 const DEFAULT_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_STALE_TIMEOUT: Duration = Duration::from_secs(60);
+const DEFAULT_ASSET_STALE_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Clone)]
 pub struct PolymarketAuth {
@@ -110,10 +113,15 @@ impl PolymarketRtds {
     }
 
     async fn resolve_asset_ids(&self) -> Result<Vec<String>> {
-        if !self.config.asset_ids.is_empty() {
-            return Ok(self.config.asset_ids.clone());
+        let mut merged: HashSet<String> = HashSet::new();
+        for id in &self.config.asset_ids {
+            merged.insert(id.clone());
         }
-        self.orderbook.load_polymarket_asset_ids().await
+        let dynamic = self.orderbook.load_polymarket_asset_ids().await?;
+        for id in dynamic {
+            merged.insert(id);
+        }
+        Ok(merged.into_iter().collect())
     }
 
     async fn seed_snapshots(&self, asset_ids: &[String]) -> Result<()> {
@@ -155,28 +163,54 @@ impl PolymarketRtds {
 
         let mut ping_interval = tokio::time::interval(self.config.ping_interval);
         let mut refresh_interval = tokio::time::interval(self.config.asset_refresh_interval);
-        let dynamic_assets = self.config.asset_ids.is_empty();
+        let stale_timeout = DEFAULT_STALE_TIMEOUT;
+        let asset_stale_timeout = DEFAULT_ASSET_STALE_TIMEOUT;
+        let mut last_event = tokio::time::Instant::now();
         let mut current_assets = asset_ids.to_vec();
         loop {
             tokio::select! {
                 _ = ping_interval.tick() => {
+                    if last_event.elapsed() > stale_timeout {
+                        tracing::warn!("polymarket rtds stale; reconnecting");
+                        return Ok(StreamOutcome::Backoff);
+                    }
                     writer.send(Message::Text("PING".to_string())).await?;
                 }
                 _ = refresh_interval.tick() => {
-                    if dynamic_assets {
-                        let latest = self.orderbook.load_polymarket_asset_ids().await?;
-                        if !latest.is_empty() && asset_ids_changed(&current_assets, &latest) {
-                            tracing::info!("polymarket asset ids updated; resubscribing");
+                    let latest = self.resolve_asset_ids().await?;
+                    if !latest.is_empty() && asset_ids_changed(&current_assets, &latest) {
+                        tracing::info!("polymarket asset ids updated; resubscribing");
+                        return Ok(StreamOutcome::Resubscribe);
+                    }
+                    current_assets = latest;
+                    let now_ms = now_ms().unwrap_or(0);
+                    for asset_id in &current_assets {
+                        let last_update = self.orderbook.last_update_ms(asset_id).await?;
+                        let age_ms = match last_update {
+                            Some(ts) => now_ms.saturating_sub(ts),
+                            None => u64::MAX,
+                        };
+                        if age_ms > asset_stale_timeout.as_millis() as u64 {
+                            tracing::warn!(
+                                asset_id = %asset_id,
+                                age_ms,
+                                "polymarket rtds asset stale; resubscribing"
+                            );
                             return Ok(StreamOutcome::Resubscribe);
                         }
-                        current_assets = latest;
                     }
                 }
                 message = reader.next() => {
                     match message {
                         Some(Ok(Message::Text(text))) => {
-                            if let Err(error) = self.handle_message(&text).await {
-                                tracing::warn!(?error, "failed to handle polymarket rtds message");
+                            match self.handle_message(&text).await {
+                                Ok(true) => {
+                                    last_event = tokio::time::Instant::now();
+                                }
+                                Ok(false) => {}
+                                Err(error) => {
+                                    tracing::warn!(?error, "failed to handle polymarket rtds message");
+                                }
                             }
                         }
                         Some(Ok(Message::Ping(payload))) => {
@@ -194,21 +228,24 @@ impl PolymarketRtds {
         Ok(StreamOutcome::Backoff)
     }
 
-    async fn handle_message(&self, text: &str) -> Result<()> {
+    async fn handle_message(&self, text: &str) -> Result<bool> {
+        let mut updated = false;
         if let Some(changes) = parse_price_change_event(text)? {
             for change in changes {
                 self.orderbook
                     .apply_level(&change.asset_id, change.side, &change.price, change.size)
                     .await?;
             }
+            updated = true;
         }
         if let Some(trade) = parse_last_trade_event(text)? {
             let _ = self
                 .orderbook
                 .set_last_trade_price(&trade.asset_id, trade.price, trade.timestamp_ms)
                 .await;
+            updated = true;
         }
-        Ok(())
+        Ok(updated)
     }
 }
 
@@ -237,6 +274,11 @@ struct LastTrade {
 enum StreamOutcome {
     Resubscribe,
     Backoff,
+}
+
+fn now_ms() -> Result<u64> {
+    let duration = SystemTime::now().duration_since(UNIX_EPOCH)?;
+    Ok(duration.as_millis() as u64)
 }
 
 fn build_subscription_payload(
