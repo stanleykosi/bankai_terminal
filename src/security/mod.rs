@@ -33,6 +33,8 @@ const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 12;
 
 pub const DEFAULT_SECRETS_PATH: &str = "config/secrets.enc";
+const ENV_SECRETS_PASSWORD: &str = "BANKAI_SECRETS_PASSWORD";
+const ENV_SECRETS_PASSWORD_FILE: &str = "BANKAI_SECRETS_PASSWORD_FILE";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EncryptedSecrets {
@@ -117,6 +119,42 @@ pub fn load_secrets(path: impl AsRef<Path>, password: &SecretString) -> Result<S
 pub fn load_secrets_interactive(path: impl AsRef<Path>) -> Result<Secrets> {
     let password = prompt_password("Enter secrets password: ")?;
     load_secrets(path, &password)
+}
+
+/// Load encrypted secrets for runtime use.
+///
+/// Resolution order:
+/// 1) `BANKAI_SECRETS_PASSWORD_FILE` (file content, trimmed of trailing newlines)
+/// 2) `BANKAI_SECRETS_PASSWORD` (raw value)
+/// 3) Interactive prompt on stdin/tty.
+pub fn load_secrets_with_env_or_prompt(path: impl AsRef<Path>) -> Result<Secrets> {
+    if let Ok(value) = std::env::var(ENV_SECRETS_PASSWORD_FILE) {
+        let value = value.trim().to_string();
+        if !value.is_empty() {
+            let raw = fs::read_to_string(&value).map_err(|error| {
+                BankaiError::Io(io::Error::new(
+                    error.kind(),
+                    format!("failed to read {ENV_SECRETS_PASSWORD_FILE} path {value}: {error}"),
+                ))
+            })?;
+            let password = raw.trim_end_matches(&['\r', '\n'][..]).to_string();
+            if password.is_empty() {
+                return Err(BankaiError::InvalidArgument(format!(
+                    "{ENV_SECRETS_PASSWORD_FILE} pointed to an empty password file"
+                )));
+            }
+            return load_secrets(path, &SecretString::new(password));
+        }
+    }
+
+    if let Ok(value) = std::env::var(ENV_SECRETS_PASSWORD) {
+        let password = value.trim().to_string();
+        if !password.is_empty() {
+            return load_secrets(path, &SecretString::new(password));
+        }
+    }
+
+    load_secrets_interactive(path)
 }
 
 fn encrypt_payload(password: &SecretString, payload: &SecretsPayload) -> Result<EncryptedSecrets> {

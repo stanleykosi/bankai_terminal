@@ -29,6 +29,7 @@ use crate::error::{BankaiError, Result};
 
 const ENV_REDIS_URL: &str = "REDIS_URL";
 const ENV_TIMESCALE_URL: &str = "TIMESCALE_URL";
+const ENV_DATABASE_URL: &str = "DATABASE_URL";
 const ENV_COLLATERAL_ADDRESS: &str = "POLYMARKET_COLLATERAL_ADDRESS";
 const ENV_CTF_ADDRESS: &str = "POLYMARKET_CTF_ADDRESS";
 
@@ -387,12 +388,16 @@ fn check_redis(timeout_duration: Duration) -> BoxFuture<'static, PreflightCheck>
 
 fn check_timescale(timeout_duration: Duration) -> BoxFuture<'static, PreflightCheck> {
     async move {
-        let Some(timescale_url) = read_env_value(ENV_TIMESCALE_URL) else {
+        let (timescale_url, source) = if let Some(value) = read_env_value(ENV_TIMESCALE_URL) {
+            (value, ENV_TIMESCALE_URL)
+        } else if let Some(value) = read_env_value(ENV_DATABASE_URL) {
+            (value, ENV_DATABASE_URL)
+        } else {
             return PreflightCheck {
                 name: "timescale".to_string(),
                 status: PreflightStatus::Failed,
                 required: true,
-                detail: format!("{ENV_TIMESCALE_URL} missing"),
+                detail: format!("{ENV_TIMESCALE_URL} / {ENV_DATABASE_URL} missing"),
                 latency_ms: None,
             };
         };
@@ -409,7 +414,7 @@ fn check_timescale(timeout_duration: Duration) -> BoxFuture<'static, PreflightCh
                 name: "timescale".to_string(),
                 status: PreflightStatus::Ok,
                 required: true,
-                detail: "connected".to_string(),
+                detail: format!("connected via {source}"),
                 latency_ms: Some(duration_to_ms(start.elapsed())),
             },
             Ok(Err(error)) => PreflightCheck {

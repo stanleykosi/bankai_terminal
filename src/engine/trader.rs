@@ -38,6 +38,21 @@ const ORDERBOOK_STALE_MS: u64 = 30_000;
 const SIGNAL_DIR_UP: i8 = 1;
 const SIGNAL_DIR_DOWN: i8 = -1;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExecutionModelVersion {
+    V1,
+    V2,
+}
+
+impl ExecutionModelVersion {
+    fn as_str(self) -> &'static str {
+        match self {
+            ExecutionModelVersion::V1 => "v1",
+            ExecutionModelVersion::V2 => "v2",
+        }
+    }
+}
+
 pub struct TradingEngine {
     config: Arc<ArcSwap<Config>>,
     risk: Arc<RiskState>,
@@ -166,7 +181,7 @@ impl TradingEngine {
             return Ok(());
         };
 
-        let _current_price = match resolve_chainlink_price(chainlink) {
+        let current_price = match resolve_chainlink_price(chainlink) {
             Some(value) => value,
             None => {
                 self.log_blocker(
@@ -440,21 +455,72 @@ impl TradingEngine {
         };
         let implied_down = implied_down.unwrap_or_else(|| (1.0 - implied_up).max(0.0));
 
-        let signal_context = compute_signal_context(
+        let model_version = resolve_model_version(&config.execution);
+        let Some(active_model) = compute_model_output(
+            model_version,
+            implied_up,
             start_price,
+            current_price,
             allora.inference_value,
             volatility,
-            config.execution.probability_scale,
+            &config.execution,
             alignment,
-        );
-        let true_up = compute_true_probability_5m(
-            start_price,
-            allora.inference_value,
-            volatility,
-            config.execution.probability_scale,
-            config.execution.probability_max_offset,
-            alignment,
-        );
+        ) else {
+            self.log_blocker(
+                state,
+                asset,
+                "model_inputs_invalid",
+                "model inputs invalid; skipping",
+                now,
+            )
+            .await;
+            return Ok(());
+        };
+        if model_version == ExecutionModelVersion::V2
+            && config.execution.model_v2_z_min > 0.0
+            && active_model.z_score.abs() < config.execution.model_v2_z_min
+        {
+            self.log_blocker(
+                state,
+                asset,
+                "v2_signal_below_min",
+                "v2 signal strength below minimum; skipping",
+                now,
+            )
+            .await;
+            return Ok(());
+        }
+        if config.execution.model_shadow_mode {
+            let shadow_model = match model_version {
+                ExecutionModelVersion::V1 => ExecutionModelVersion::V2,
+                ExecutionModelVersion::V2 => ExecutionModelVersion::V1,
+            };
+            if let Some(shadow_output) = compute_model_output(
+                shadow_model,
+                implied_up,
+                start_price,
+                current_price,
+                allora.inference_value,
+                volatility,
+                &config.execution,
+                alignment,
+            ) {
+                self.log_model_shadow(
+                    state,
+                    asset,
+                    &asset_window.market_id,
+                    model_version,
+                    active_model,
+                    shadow_model,
+                    shadow_output,
+                    implied_up,
+                    now,
+                )
+                .await;
+            }
+        }
+        let signal_context = active_model.signal_context;
+        let true_up = active_model.true_up;
         let true_down = (1.0 - true_up).clamp(0.0, 1.0);
 
         let mut best_intent: Option<TradeIntent> = None;
@@ -472,7 +538,18 @@ impl TradingEngine {
             &up_fees,
         ) {
             if let Some(mut intent) = result.intent {
-                if !signal_allows_direction(
+                if model_version == ExecutionModelVersion::V2
+                    && result.edge_bps < config.execution.model_v2_edge_floor_bps
+                {
+                    self.log_blocker(
+                        state,
+                        asset,
+                        "v2_edge_floor_up",
+                        "v2 edge floor blocks UP intent",
+                        now,
+                    )
+                    .await;
+                } else if !signal_allows_direction(
                     &config.execution,
                     signal_context.as_ref(),
                     SIGNAL_DIR_UP,
@@ -552,7 +629,18 @@ impl TradingEngine {
             &down_fees,
         ) {
             if let Some(mut intent) = result.intent {
-                if !signal_allows_direction(
+                if model_version == ExecutionModelVersion::V2
+                    && result.edge_bps < config.execution.model_v2_edge_floor_bps
+                {
+                    self.log_blocker(
+                        state,
+                        asset,
+                        "v2_edge_floor_down",
+                        "v2 edge floor blocks DOWN intent",
+                        now,
+                    )
+                    .await;
+                } else if !signal_allows_direction(
                     &config.execution,
                     signal_context.as_ref(),
                     SIGNAL_DIR_DOWN,
@@ -755,6 +843,54 @@ impl TradingEngine {
             .await;
     }
 
+    async fn log_model_shadow(
+        &self,
+        state: &mut TraderState,
+        asset: &str,
+        market_id: &str,
+        active_version: ExecutionModelVersion,
+        active: ModelOutput,
+        shadow_version: ExecutionModelVersion,
+        shadow: ModelOutput,
+        implied_up: f64,
+        now_ms: u64,
+    ) {
+        let throttle_ms = 30_000;
+        let cache_key = format!(
+            "{asset}:{}:{}",
+            active_version.as_str(),
+            shadow_version.as_str()
+        );
+        let last = state
+            .last_model_shadow_log_ms
+            .get(&cache_key)
+            .copied()
+            .unwrap_or(0);
+        if now_ms.saturating_sub(last) < throttle_ms {
+            return;
+        }
+        state.last_model_shadow_log_ms.insert(cache_key, now_ms);
+
+        let active_edge_bps = (active.true_up - implied_up) * 10_000.0;
+        let shadow_edge_bps = (shadow.true_up - implied_up) * 10_000.0;
+        let prefix = log_prefix();
+        let entry = format!(
+            "{prefix} [MODEL] {asset} market={market_id} active={} true_up={:.4} edge_bps={:.1} z={:.3} shadow={} true_up={:.4} edge_bps={:.1} z={:.3}",
+            active_version.as_str(),
+            active.true_up,
+            active_edge_bps,
+            active.z_score,
+            shadow_version.as_str(),
+            shadow.true_up,
+            shadow_edge_bps,
+            shadow.z_score
+        );
+        let _ = self
+            .redis
+            .push_activity_log(&entry, ACTIVITY_LOG_LIMIT)
+            .await;
+    }
+
     async fn check_exit_intent(
         &self,
         _asset: &str,
@@ -864,6 +1000,7 @@ struct TraderState {
     last_min_order_alert_ms: HashMap<String, u64>,
     last_no_intent_alert_ms: HashMap<String, u64>,
     last_blocker_alert_ms: HashMap<String, u64>,
+    last_model_shadow_log_ms: HashMap<String, u64>,
     boot_time_ms: u64,
 }
 
@@ -881,6 +1018,7 @@ impl TraderState {
             last_min_order_alert_ms: HashMap::new(),
             last_no_intent_alert_ms: HashMap::new(),
             last_blocker_alert_ms: HashMap::new(),
+            last_model_shadow_log_ms: HashMap::new(),
             boot_time_ms,
         }
     }
@@ -896,6 +1034,13 @@ struct AlignedSignal {
 struct SignalContext {
     direction: i8,
     confidence: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ModelOutput {
+    true_up: f64,
+    signal_context: Option<SignalContext>,
+    z_score: f64,
 }
 
 fn select_aligned_5m_signal(
@@ -993,6 +1138,79 @@ fn alignment_horizon_ms(config: &Config, asset: &str) -> u64 {
     }
 }
 
+fn resolve_model_version(execution: &ExecutionConfig) -> ExecutionModelVersion {
+    match execution.model_version.trim().to_ascii_lowercase().as_str() {
+        "v2" => ExecutionModelVersion::V2,
+        _ => ExecutionModelVersion::V1,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compute_model_output(
+    model: ExecutionModelVersion,
+    market_up_prob: f64,
+    start_price: f64,
+    current_price: f64,
+    predicted_price: f64,
+    volatility_1m: f64,
+    execution: &ExecutionConfig,
+    alignment: f64,
+) -> Option<ModelOutput> {
+    match model {
+        ExecutionModelVersion::V1 => {
+            let z = compute_signal_z_score(
+                start_price,
+                predicted_price,
+                volatility_1m,
+                execution.probability_scale,
+            )
+            .unwrap_or(0.0);
+            Some(ModelOutput {
+                true_up: compute_true_probability_5m(
+                    start_price,
+                    predicted_price,
+                    volatility_1m,
+                    execution.probability_scale,
+                    execution.probability_max_offset,
+                    alignment,
+                ),
+                signal_context: compute_signal_context(
+                    start_price,
+                    predicted_price,
+                    volatility_1m,
+                    execution.probability_scale,
+                    alignment,
+                ),
+                z_score: z,
+            })
+        }
+        ExecutionModelVersion::V2 => {
+            let z = compute_signal_z_score(
+                current_price,
+                predicted_price,
+                volatility_1m,
+                execution.probability_scale,
+            )?;
+            Some(ModelOutput {
+                true_up: compute_true_probability_v2(
+                    market_up_prob,
+                    z,
+                    execution.model_v2_k,
+                    alignment,
+                ),
+                signal_context: compute_signal_context(
+                    current_price,
+                    predicted_price,
+                    volatility_1m,
+                    execution.probability_scale,
+                    alignment,
+                ),
+                z_score: z,
+            })
+        }
+    }
+}
+
 fn compute_signal_context(
     current_price: f64,
     predicted_price: f64,
@@ -1019,6 +1237,47 @@ fn compute_signal_context(
         direction,
         confidence: confidence.clamp(0.0, 1.0),
     })
+}
+
+fn compute_signal_z_score(
+    current_price: f64,
+    predicted_price: f64,
+    volatility_1m: f64,
+    scale: f64,
+) -> Option<f64> {
+    if current_price <= 0.0 {
+        return None;
+    }
+    let delta = (predicted_price - current_price) / current_price;
+    let volatility_5m = (volatility_1m * SQRT_5).max(1e-9);
+    let z = delta / volatility_5m;
+    Some(z * scale)
+}
+
+fn compute_true_probability_v2(market_up_prob: f64, z_score: f64, k: f64, alignment: f64) -> f64 {
+    let prior = clamp_probability(market_up_prob);
+    let update = z_score * k * alignment;
+    let posterior_logit = logit(prior) + update;
+    sigmoid(posterior_logit).clamp(0.01, 0.99)
+}
+
+fn clamp_probability(value: f64) -> f64 {
+    value.clamp(0.01, 0.99)
+}
+
+fn logit(value: f64) -> f64 {
+    let p = clamp_probability(value);
+    (p / (1.0 - p)).ln()
+}
+
+fn sigmoid(value: f64) -> f64 {
+    if value >= 0.0 {
+        let exp = (-value).exp();
+        1.0 / (1.0 + exp)
+    } else {
+        let exp = value.exp();
+        exp / (1.0 + exp)
+    }
 }
 
 fn signal_allows_direction(
@@ -1263,5 +1522,38 @@ mod tests {
             SIGNAL_DIR_UP,
             2000.0
         ));
+    }
+
+    #[test]
+    fn resolve_model_version_defaults_to_v1() {
+        let mut execution = ExecutionConfig::default();
+        execution.model_version = "unknown".to_string();
+        assert_eq!(resolve_model_version(&execution), ExecutionModelVersion::V1);
+        execution.model_version = "v2".to_string();
+        assert_eq!(resolve_model_version(&execution), ExecutionModelVersion::V2);
+    }
+
+    #[test]
+    fn v2_probability_moves_with_signal_direction() {
+        let up = compute_true_probability_v2(0.55, 1.2, 0.5, 1.0);
+        let down = compute_true_probability_v2(0.55, -1.2, 0.5, 1.0);
+        assert!(up > 0.55);
+        assert!(down < 0.55);
+    }
+
+    #[test]
+    fn v2_alignment_scales_adjustment() {
+        let full_align = compute_true_probability_v2(0.60, 1.0, 0.7, 1.0);
+        let weak_align = compute_true_probability_v2(0.60, 1.0, 0.7, 0.2);
+        assert!(full_align > weak_align);
+        assert!(weak_align > 0.60);
+    }
+
+    #[test]
+    fn v2_uses_market_prior() {
+        let z = 0.2;
+        let low_prior = compute_true_probability_v2(0.35, z, 0.5, 1.0);
+        let high_prior = compute_true_probability_v2(0.75, z, 0.5, 1.0);
+        assert!(high_prior > low_prior);
     }
 }

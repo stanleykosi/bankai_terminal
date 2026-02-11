@@ -1,13 +1,3 @@
-/**
- * @purpose
- * Runtime configuration for Bankai Terminal.
- *
- * @dependencies
- * - None
- *
- * @notes
- * - JSDoc header is stripped before JSON parsing.
- */
 {
   "endpoints": {
     "chainlink_ws": "wss://ws-live-data.polymarket.com",
@@ -44,6 +34,11 @@
     "max_impact_bps": 100.0,
     "probability_scale": 1.0,
     "probability_max_offset": 0.35,
+    "model_version": "v1",
+    "model_shadow_mode": true,
+    "model_v2_k": 0.5,
+    "model_v2_z_min": 0.35,
+    "model_v2_edge_floor_bps": 50.0,
     "signal_direction_gate": true,
     "contrarian_min_edge_bps": 0.0,
     "contrarian_confidence_min": 0.7,

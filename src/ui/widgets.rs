@@ -197,6 +197,13 @@ fn render_status_bar(frame: &mut Frame, area: Rect, status: &StatusBarData) {
         Span::styled("Mode", Style::default().fg(Color::DarkGray)),
         Span::raw(": "),
         Span::styled(mode_label, mode_style),
+        Span::raw("  "),
+        Span::styled("Model", Style::default().fg(Color::DarkGray)),
+        Span::raw(": "),
+        Span::styled(
+            status.model_version.clone(),
+            Style::default().fg(Color::White),
+        ),
     ];
 
     let paragraph = Paragraph::new(Line::from(spans))
@@ -706,6 +713,9 @@ fn mode_style(mode: &MarketMode) -> Style {
     match mode {
         MarketMode::Snipe => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         MarketMode::Ladder => Style::default().fg(Color::Green),
+        MarketMode::Wait => Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
         MarketMode::Hold => Style::default().fg(Color::Yellow),
         MarketMode::NoSignal => Style::default().fg(Color::DarkGray),
     }

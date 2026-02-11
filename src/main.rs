@@ -80,7 +80,7 @@ async fn main() -> Result<()> {
     let config = config_manager.current();
 
     tracing::info!(?config, "config loaded");
-    let secrets = security::load_secrets_interactive(DEFAULT_SECRETS_PATH)?;
+    let secrets = security::load_secrets_with_env_or_prompt(DEFAULT_SECRETS_PATH)?;
     tracing::info!("secrets loaded");
 
     if config.preflight.enabled {
@@ -473,18 +473,20 @@ async fn spawn_execution_pipeline(
     )?;
     let relayer = RelayerClient::new(RelayerConfig::new(config.endpoints.relayer_http.clone()))?;
 
-    let database = match std::env::var("DATABASE_URL") {
-        Ok(url) => match bankai_terminal::storage::database::DatabaseManager::new(&url, 5).await {
-            Ok(db) => Some(db),
-            Err(error) => {
-                tracing::warn!(
-                    ?error,
-                    "failed to connect to database; execution logging disabled"
-                );
-                None
+    let database = match resolve_timescale_url() {
+        Some(url) => {
+            match bankai_terminal::storage::database::DatabaseManager::new(&url, 5).await {
+                Ok(db) => Some(db),
+                Err(error) => {
+                    tracing::warn!(
+                        ?error,
+                        "failed to connect to database; execution logging disabled"
+                    );
+                    None
+                }
             }
-        },
-        Err(_) => None,
+        }
+        None => None,
     };
 
     let cancel_client = wallet_key.as_ref().and_then(|address| {
@@ -719,6 +721,20 @@ fn read_env_u32(key: &str) -> Option<u32> {
     std::env::var(key)
         .ok()
         .and_then(|value| value.parse::<u32>().ok())
+}
+
+fn resolve_timescale_url() -> Option<String> {
+    // Prefer TIMESCALE_URL (repo convention) but accept DATABASE_URL (sqlx convention).
+    std::env::var("TIMESCALE_URL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            std::env::var("DATABASE_URL")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
 }
 
 async fn spawn_tui_if_enabled(

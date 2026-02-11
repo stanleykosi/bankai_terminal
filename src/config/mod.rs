@@ -109,6 +109,16 @@ pub struct ExecutionConfig {
     pub probability_scale: f64,
     #[serde(default = "default_execution_probability_max_offset")]
     pub probability_max_offset: f64,
+    #[serde(default = "default_execution_model_version")]
+    pub model_version: String,
+    #[serde(default = "default_execution_model_shadow_mode")]
+    pub model_shadow_mode: bool,
+    #[serde(default = "default_execution_model_v2_k")]
+    pub model_v2_k: f64,
+    #[serde(default = "default_execution_model_v2_z_min")]
+    pub model_v2_z_min: f64,
+    #[serde(default = "default_execution_model_v2_edge_floor_bps")]
+    pub model_v2_edge_floor_bps: f64,
     #[serde(default = "default_execution_signal_direction_gate")]
     pub signal_direction_gate: bool,
     #[serde(default = "default_execution_contrarian_min_edge_bps")]
@@ -190,6 +200,11 @@ impl Default for ExecutionConfig {
             max_impact_bps: default_execution_max_impact_bps(),
             probability_scale: default_execution_probability_scale(),
             probability_max_offset: default_execution_probability_max_offset(),
+            model_version: default_execution_model_version(),
+            model_shadow_mode: default_execution_model_shadow_mode(),
+            model_v2_k: default_execution_model_v2_k(),
+            model_v2_z_min: default_execution_model_v2_z_min(),
+            model_v2_edge_floor_bps: default_execution_model_v2_edge_floor_bps(),
             signal_direction_gate: default_execution_signal_direction_gate(),
             contrarian_min_edge_bps: default_execution_contrarian_min_edge_bps(),
             contrarian_confidence_min: default_execution_contrarian_confidence_min(),
@@ -389,6 +404,26 @@ fn default_execution_probability_scale() -> f64 {
 
 fn default_execution_probability_max_offset() -> f64 {
     0.35
+}
+
+fn default_execution_model_version() -> String {
+    "v1".to_string()
+}
+
+fn default_execution_model_shadow_mode() -> bool {
+    false
+}
+
+fn default_execution_model_v2_k() -> f64 {
+    0.5
+}
+
+fn default_execution_model_v2_z_min() -> f64 {
+    0.0
+}
+
+fn default_execution_model_v2_edge_floor_bps() -> f64 {
+    0.0
 }
 
 fn default_execution_signal_direction_gate() -> bool {

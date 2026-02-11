@@ -60,6 +60,21 @@ const PAPER_STATS_MISSED_REASON_KEY: &str = "paper:stats:missed_reason";
 const PAPER_BANKROLL_KEY: &str = "paper:bankroll:usdc";
 const PAPER_BANKROLL_START_KEY: &str = "paper:bankroll:start_usdc";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExecutionModelVersion {
+    V1,
+    V2,
+}
+
+impl ExecutionModelVersion {
+    fn as_str(self) -> &'static str {
+        match self {
+            ExecutionModelVersion::V1 => "v1",
+            ExecutionModelVersion::V2 => "v2",
+        }
+    }
+}
+
 type UiResult<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 #[derive(Debug, Clone)]
@@ -90,6 +105,7 @@ pub struct StatusBarData {
     pub allora_online: bool,
     pub polymarket_online: bool,
     pub no_money_mode: bool,
+    pub model_version: String,
 }
 
 #[derive(Debug, Clone)]
@@ -142,6 +158,7 @@ pub struct ActiveWindowRow {
 #[derive(Debug, Clone)]
 pub enum MarketMode {
     NoSignal,
+    Wait,
     Hold,
     Ladder,
     Snipe,
@@ -151,6 +168,7 @@ impl MarketMode {
     pub fn label(&self) -> &'static str {
         match self {
             Self::NoSignal => "NO_SIGNAL",
+            Self::Wait => "WAIT",
             Self::Hold => "HOLD",
             Self::Ladder => "LADDER",
             Self::Snipe => "SNIPE",
@@ -807,6 +825,9 @@ fn build_snapshot(
         ),
         polymarket_online: is_polymarket_online(polymarket_last_refresh),
         no_money_mode: config.execution.no_money_mode,
+        model_version: resolve_model_version(&config.execution)
+            .as_str()
+            .to_ascii_uppercase(),
     };
 
     let health = HealthPanelData {
@@ -897,32 +918,74 @@ fn build_market_row(
         .volatility_1m
         .unwrap_or(config.execution.min_volatility)
         .max(config.execution.min_volatility);
-    let signal_context = match (snapshot.start_price, snapshot.inference_5m, alignment) {
-        (Some(start_price), Some(predicted), Some(alignment)) => compute_signal_context(
-            start_price,
-            predicted,
-            volatility_1m,
-            config.execution.probability_scale,
-            alignment,
-        ),
-        _ => None,
-    };
+    let model_version = resolve_model_version(&config.execution);
+    let model_output = compute_model_output(
+        model_version,
+        implied_up,
+        snapshot.start_price,
+        snapshot.price,
+        snapshot.inference_5m,
+        volatility_1m,
+        &config.execution,
+        alignment,
+    );
+    let signal_context = model_output.and_then(|value| value.signal_context);
 
-    let true_up = match (snapshot.start_price, snapshot.inference_5m, alignment) {
-        (Some(start_price), Some(predicted), Some(alignment)) => Some(compute_true_probability_5m(
-            start_price,
-            predicted,
-            volatility_1m,
-            config.execution.probability_scale,
-            config.execution.probability_max_offset,
-            alignment,
-        )),
-        _ => None,
-    };
+    // The trading engine intentionally does not act until the target timestamp
+    // (`window.end - horizon`). Showing an "EV" before that point is misleading because the
+    // same signal is down-weighted by alignment and will almost always look like HOLD.
+    let pre_target = snapshot
+        .window
+        .map(|window| now_ms < window.end_time_ms.saturating_sub(horizon_ms))
+        .unwrap_or(false);
+
+    if pre_target {
+        let side = signal_context
+            .as_ref()
+            .and_then(|signal| match signal.direction {
+                SIGNAL_DIR_UP => Some("UP".to_string()),
+                SIGNAL_DIR_DOWN => Some("DOWN".to_string()),
+                _ => None,
+            });
+        let has_side = side.is_some();
+
+        return MarketRow {
+            asset: snapshot.asset.clone(),
+            price: snapshot.price,
+            implied_up,
+            min_order_size: snapshot.min_order_size,
+            start_price: snapshot.start_price,
+            inference_5m: snapshot.inference_5m,
+            edge_bps: None,
+            side,
+            fee_bps: snapshot.fee_rate_up_bps,
+            mode: if has_side {
+                MarketMode::Wait
+            } else {
+                MarketMode::NoSignal
+            },
+            last_update_ms,
+        };
+    }
+
+    let mut true_up = model_output.map(|value| value.true_up);
+    if model_version == ExecutionModelVersion::V2
+        && config.execution.model_v2_z_min > 0.0
+        && model_output
+            .map(|value| value.z_score.abs() < config.execution.model_v2_z_min)
+            .unwrap_or(false)
+    {
+        true_up = None;
+    }
     let true_down = true_up.map(|value| (1.0 - value).clamp(0.0, 1.0));
 
     let decision_up = decide_edge(true_up, implied_up_mid, implied_up_vwap, snipe_floor_bps)
         .and_then(|edge| {
+            if model_version == ExecutionModelVersion::V2
+                && edge.edge_bps < config.execution.model_v2_edge_floor_bps
+            {
+                return None;
+            }
             if signal_allows_direction(
                 &config.execution,
                 signal_context.as_ref(),
@@ -941,6 +1004,11 @@ fn build_market_row(
         snipe_floor_bps,
     )
     .and_then(|edge| {
+        if model_version == ExecutionModelVersion::V2
+            && edge.edge_bps < config.execution.model_v2_edge_floor_bps
+        {
+            return None;
+        }
         if signal_allows_direction(
             &config.execution,
             signal_context.as_ref(),
@@ -1123,6 +1191,7 @@ fn ui_loop(receiver: mpsc::Receiver<UiCommand>, config: TuiConfig) -> UiResult<(
             allora_online: false,
             polymarket_online: false,
             no_money_mode: false,
+            model_version: "V1".to_string(),
         },
         health: HealthPanelData {
             halted: false,
@@ -1288,6 +1357,91 @@ struct SignalContext {
     confidence: f64,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ModelOutput {
+    true_up: f64,
+    signal_context: Option<SignalContext>,
+    z_score: f64,
+}
+
+fn resolve_model_version(execution: &ExecutionConfig) -> ExecutionModelVersion {
+    match execution.model_version.trim().to_ascii_lowercase().as_str() {
+        "v2" => ExecutionModelVersion::V2,
+        _ => ExecutionModelVersion::V1,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compute_model_output(
+    model: ExecutionModelVersion,
+    market_up_prob: Option<f64>,
+    start_price: Option<f64>,
+    current_price: Option<f64>,
+    predicted_price: Option<f64>,
+    volatility_1m: f64,
+    execution: &ExecutionConfig,
+    alignment: Option<f64>,
+) -> Option<ModelOutput> {
+    let predicted_price = predicted_price?;
+    let alignment = alignment?;
+    match model {
+        ExecutionModelVersion::V1 => {
+            let start_price = start_price?;
+            let z = compute_signal_z_score(
+                start_price,
+                predicted_price,
+                volatility_1m,
+                execution.probability_scale,
+            )
+            .unwrap_or(0.0);
+            Some(ModelOutput {
+                true_up: compute_true_probability_5m(
+                    start_price,
+                    predicted_price,
+                    volatility_1m,
+                    execution.probability_scale,
+                    execution.probability_max_offset,
+                    alignment,
+                ),
+                signal_context: compute_signal_context(
+                    start_price,
+                    predicted_price,
+                    volatility_1m,
+                    execution.probability_scale,
+                    alignment,
+                ),
+                z_score: z,
+            })
+        }
+        ExecutionModelVersion::V2 => {
+            let current_price = current_price?;
+            let market_up_prob = market_up_prob?;
+            let z = compute_signal_z_score(
+                current_price,
+                predicted_price,
+                volatility_1m,
+                execution.probability_scale,
+            )?;
+            Some(ModelOutput {
+                true_up: compute_true_probability_v2(
+                    market_up_prob,
+                    z,
+                    execution.model_v2_k,
+                    alignment,
+                ),
+                signal_context: compute_signal_context(
+                    current_price,
+                    predicted_price,
+                    volatility_1m,
+                    execution.probability_scale,
+                    alignment,
+                ),
+                z_score: z,
+            })
+        }
+    }
+}
+
 fn compute_signal_context(
     current_price: f64,
     predicted_price: f64,
@@ -1295,13 +1449,7 @@ fn compute_signal_context(
     scale: f64,
     alignment: f64,
 ) -> Option<SignalContext> {
-    if current_price <= 0.0 {
-        return None;
-    }
-    let delta = (predicted_price - current_price) / current_price;
-    let volatility_5m = (volatility_1m * SQRT_5).max(1e-9);
-    let z = delta / volatility_5m;
-    let z_scaled = z * scale;
+    let z_scaled = compute_signal_z_score(current_price, predicted_price, volatility_1m, scale)?;
     let confidence = z_scaled.abs().tanh() * alignment;
     let direction = if z_scaled > 0.0 {
         SIGNAL_DIR_UP
@@ -1314,6 +1462,21 @@ fn compute_signal_context(
         direction,
         confidence: confidence.clamp(0.0, 1.0),
     })
+}
+
+fn compute_signal_z_score(
+    current_price: f64,
+    predicted_price: f64,
+    volatility_1m: f64,
+    scale: f64,
+) -> Option<f64> {
+    if current_price <= 0.0 {
+        return None;
+    }
+    let delta = (predicted_price - current_price) / current_price;
+    let volatility_5m = (volatility_1m * SQRT_5).max(1e-9);
+    let z = delta / volatility_5m;
+    Some(z * scale)
 }
 
 fn signal_allows_direction(
@@ -1354,6 +1517,32 @@ fn compute_true_probability_5m(
     let z = delta / volatility_5m;
     let offset = (z * scale).tanh() * max_offset * alignment;
     (0.5 + offset).clamp(0.01, 0.99)
+}
+
+fn compute_true_probability_v2(market_up_prob: f64, z_score: f64, k: f64, alignment: f64) -> f64 {
+    let prior = clamp_probability(market_up_prob);
+    let update = z_score * k * alignment;
+    let posterior_logit = logit(prior) + update;
+    sigmoid(posterior_logit).clamp(0.01, 0.99)
+}
+
+fn clamp_probability(value: f64) -> f64 {
+    value.clamp(0.01, 0.99)
+}
+
+fn logit(value: f64) -> f64 {
+    let p = clamp_probability(value);
+    (p / (1.0 - p)).ln()
+}
+
+fn sigmoid(value: f64) -> f64 {
+    if value >= 0.0 {
+        let exp = (-value).exp();
+        1.0 / (1.0 + exp)
+    } else {
+        let exp = value.exp();
+        exp / (1.0 + exp)
+    }
 }
 
 fn is_polymarket_online(last_refresh: Option<Instant>) -> bool {
